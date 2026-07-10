@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Datasets & generated data (make your own — see docs/REPRODUCE.md)
+pingpong-export/
+dataset/
+training/cache/
+*.npy
+
+# Model weights & artifacts (large; regenerate with the scripts)
+*.pt
+*.onnx
+*.dlc
+*.bin
+*.raw
+yolo/runs/
+yolo/calib/
+training/checkpoints/
+
+# Cross-compiled binaries
+qnn-daemon-aarch64
+*.o
+
+# OS
+.DS_Store

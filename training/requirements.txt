@@ -1,0 +1,9 @@
+# Paddle detection training (Phase A) — Mac arm64, uses MPS/Metal when available.
+# Install into a local venv:
+#   python3 -m venv training/.venv
+#   training/.venv/bin/pip install -r training/requirements.txt
+torch
+torchvision
+numpy
+opencv-python-headless
+onnx           # required for export_onnx.py

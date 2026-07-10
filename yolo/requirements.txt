@@ -1,0 +1,10 @@
+# Phase B — YOLOv8 fine-tuning (Mac arm64, MPS).
+# ISOLATED environment from Phase A: create a dedicated venv to avoid mixing dependencies.
+#   python3 -m venv yolo/.venv
+#   yolo/.venv/bin/pip install -r yolo/requirements.txt
+#
+# ultralytics already pulls in torch, torchvision, opencv-python, numpy, pyyaml, etc.
+# onnx/onnxruntime come in for the export and the inference test.
+ultralytics
+onnx
+onnxruntime
