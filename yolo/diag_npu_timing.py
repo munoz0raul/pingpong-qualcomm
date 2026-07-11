@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Diagnostic: where the time goes in the NPU cycle (write raw / FIFO / execute / read out / decode)."""
+"""Diagnostic: where the time goes in the in-memory NPU cycle
+(quantize / write / signal / wait / read+dequantize)."""
 import os, sys, time
 import numpy as np
 import cv2
@@ -8,6 +9,7 @@ from infer_npu import PaddleDetector, IN_FILE, RESP_FIFO, OUT_RAW, N_CHANNELS, N
 from infer_yolo import _letterbox, IMG_SIZE
 
 det = PaddleDetector()
+q = det.quant
 frame = cv2.imread("/tmp/emeet2.jpg")
 
 # pre-process 1x (fixed)
@@ -16,29 +18,34 @@ rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
 chw = (rgb.astype(np.float32)/255.0).transpose(2,0,1)[np.newaxis,...].copy()
 
 N = 50
-acc = {"write":0.0, "signal":0.0, "wait":0.0, "read":0.0}
+acc = {"quant":0.0, "write":0.0, "signal":0.0, "wait":0.0, "read_deq":0.0}
 # warmup
 for _ in range(5):
     det._run_npu(chw)
 
 for _ in range(N):
     t0 = time.perf_counter()
-    chw.astype(np.float32).tofile(IN_FILE)
+    qin = np.rint(chw.astype(np.float32).ravel() / q["in_scale"] - q["in_offset"])
+    qin = np.clip(qin, 0, 65535).astype(np.uint16)
     t1 = time.perf_counter()
-    det._cmd.write("g\n"); det._cmd.flush()
+    qin.tofile(IN_FILE)
     t2 = time.perf_counter()
+    det._cmd.write("r\n"); det._cmd.flush()
+    t3 = time.perf_counter()
     with open(RESP_FIFO,"r") as r:
         ans = r.readline().strip()
-    t3 = time.perf_counter()
-    out = np.fromfile(OUT_RAW, dtype=np.float32).reshape(1,N_CHANNELS,N_ANCHORS)
     t4 = time.perf_counter()
-    acc["write"]  += (t1-t0)*1000
-    acc["signal"] += (t2-t1)*1000
-    acc["wait"]   += (t3-t2)*1000   # FIFO out + execute NPU + write out by the daemon + FIFO back
-    acc["read"]   += (t4-t3)*1000
+    qout = np.fromfile(OUT_RAW, dtype=np.uint16)
+    out = ((qout.astype(np.float32) + q["out_offset"]) * q["out_scale"]).reshape(1,N_CHANNELS,N_ANCHORS)
+    t5 = time.perf_counter()
+    acc["quant"]    += (t1-t0)*1000   # vectorized float32 -> uint16
+    acc["write"]    += (t2-t1)*1000   # native bytes -> file (RAM tmpfs)
+    acc["signal"]   += (t3-t2)*1000
+    acc["wait"]     += (t4-t3)*1000   # FIFO out + daemon memcpy+execute+write + FIFO back
+    acc["read_deq"] += (t5-t4)*1000   # read uint16 + vectorized dequantize
 
 print(f"averages over {N} iters (ms):")
 for k,v in acc.items():
-    print(f"  {k:8s}: {v/N:.3f}")
-print(f"  TOTAL   : {sum(acc.values())/N:.3f}")
+    print(f"  {k:9s}: {v/N:.3f}")
+print(f"  TOTAL    : {sum(acc.values())/N:.3f}")
 det.close()

@@ -164,27 +164,40 @@ healthy confident detection again.
 And now the headline: **the NPU does the model's raw math about 84 times faster than
 the CPU** — 1.7 thousandths of a second versus 145. Astonishing.
 
-So I expected the live video to fly. I measured the *whole* pipeline honestly, and…
-**the NPU version was slightly slower overall.** 57 milliseconds per frame on the NPU
-versus 42 on the CPU.
+So I expected the live video to fly. I measured the *whole* pipeline honestly, and at
+first it *didn't*: the NPU version came out slightly slower overall — around 57
+milliseconds per frame versus 42 on the CPU. The 84×-faster engine was losing the race.
 
-How can the 84×-faster engine lose? Because the math was never the slow part. To use the
-NPU I had to, every single frame, write the image out to a file, poke the chip, wait,
-and read the answer back from another file. All that fetching and carrying — the
-**road to the chip** — cost about 30 milliseconds. The chip did its 1.7 ms of blazing
-work and then sat waiting on the delivery truck. On a model this small, the delivery
-cost more than the whole CPU computation.
+That made no sense, so I went looking. The math was never the slow part — the chip did
+its 1.7 ms and then sat waiting. The waiting had a cause, and it wasn't what I assumed.
+To go fast, the NPU wants its numbers in a compact 16-bit whole-number format, not the
+long decimals the camera frame arrives as. Something has to translate every frame into
+that format, and the answer back out of it. I had been letting the chip's toolkit do that
+translation — and it did it the slow way, **one number at a time**, three hundred thousand
+numbers per frame, on the CPU. *That* was the 30 lost milliseconds. (I'd first guessed it
+was the cost of writing files to storage — but the files live in RAM, so that part was
+nearly free. Measuring, again, corrected my guess.)
 
-This isn't a failure — it's one of the most useful lessons in all of engineering, and I
-got to *measure* it rather than just read it:
+The fix was to do the translation the smart way: convert the *whole* frame at once with a
+fast math library (a fraction of a millisecond), hand the chip exactly the bytes it wants,
+and read its answer back the same way. No more translating number-by-number.
 
-> **The one thing to remember from Part 6:** a faster engine only helps if the road to
-> it isn't the bottleneck. The NPU wins big when the model is large enough that the math
-> truly dominates, or when you build a proper fast lane to feed it (shared memory instead
-> of files). For a tiny model fed through files, the humble CPU quietly wins.
+With that fixed, I measured again — and the NPU **won, cleanly: about 25 milliseconds per
+frame versus 42 on the CPU, a real 1.7× speedup end-to-end**, with the identical detection
+(same green box, same confidence). The blazing engine finally got a road to match.
 
-I still got what I came for: the paddle recognized **live, on the Qualcomm NPU**, a green
-box tracking it in real time — the exact thing the from-scratch brain could never do.
+This detour is one of the most useful lessons in all of engineering, and I got to
+*measure* every step of it rather than just read about it:
+
+> **The one thing to remember from Part 6:** a faster engine only helps if the road to it
+> isn't the bottleneck — and the bottleneck is rarely where you first guess. The NPU's raw
+> math was 84× faster all along; the win only showed up once I stopped feeding it in the
+> wrong format and translating one number at a time. Feed the accelerator the way it wants
+> to be fed, and it wins.
+
+And I got what I came for: the paddle recognized **live, on the Qualcomm NPU**, a green
+box tracking it in real time, *faster* than the CPU — the exact thing the from-scratch
+brain could never do.
 
 ---
 
@@ -198,8 +211,8 @@ pieces turned out to matter just as much, and they're all in this repo:
 - **The diagnosis of *why* the first model failed** (Part 2) — the face, the darkness.
   Knowing *why* something breaks is worth more than the fix itself.
 - **Measuring, not assuming** — the CPU-vs-NPU benchmark (Part 6) is the whole reason we
-  learned the "road to the chip" lesson. If I'd just trusted the "84× faster" headline,
-  I'd have shipped the slower version and never known.
+  learned the "road to the chip" lesson. The NPU first *looked* slower; only measuring —
+  and then measuring again after the fix — revealed both the problem and the real 1.7× win.
 - **The quantization trap** (Part 6) — the collapsing-score bug and its fix.
 - **A few real-world gremlins** — a USB camera that needed a full reboot (not a replug)
   to come back, a camera that stayed "locked" if you forgot to press stop. The
@@ -213,10 +226,12 @@ pieces turned out to matter just as much, and they're all in this repo:
    not one that understands.
 2. **Don't build from zero.** Fine-tuning a giant pre-trained model beat my hand-built
    one without contest.
-3. **Measure the whole thing, honestly.** The "84× faster" chip lost the real race,
-   and only measuring revealed it.
-4. **The bottleneck is rarely where you think.** It wasn't the math — it was the road to
-   the math.
+3. **Measure the whole thing, honestly.** The "84× faster" chip *looked* like it lost the
+   real race — until measuring showed the loss was a fixable format-conversion cost, not
+   the chip.
+4. **The bottleneck is rarely where you think.** It wasn't the math, and it wasn't the disk
+   — it was translating each frame into the chip's format one number at a time. Fix the
+   road, and the fast engine finally wins.
 
 If you want to do all of this yourself, every command is in
 **[REPRODUCE.md](REPRODUCE.md)**.

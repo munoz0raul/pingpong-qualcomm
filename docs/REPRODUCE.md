@@ -392,16 +392,20 @@ command**.
 
 We built it by adapting Qualcomm's SDK `SampleApp`. The sources are in `npu/daemon/`:
 - `QnnSampleApp.cpp` — the added **`runDaemon()`** method: set up the tensors once, then
-  loop reading a command FIFO. On `"g"`: re-read the input file, execute on the NPU, write
-  the output, reply `"1"`. On `"q"`: quit.
+  loop reading a command FIFO. Two per-frame paths: on `"g"` (legacy) it re-reads the input
+  file and lets the SDK convert float↔uint16 element-by-element; on `"r"` (the fast in-memory
+  path, see Step 9) it **memcpy's the already-native `uint16` bytes** straight into the tensor
+  buffer and writes the raw output back. Either way it executes and replies `"1"`. On `"q"`:
+  quit. At startup it prints a `QUANT` banner (input/output `scale`, `offset`, byte sizes) so
+  the Python side can quantize/dequantize identically in numpy.
 - `main.cpp` — the added `--daemon --cmd_fifo --resp_fifo --in_file --out_file` flags.
 
 **Protocol** (Python ↔ daemon, via files + FIFOs, all in `/tmp` which is a RAM disk):
-Python writes the frame to `/tmp/npu_in.raw`, sends `"g\n"` on the command FIFO, the
-daemon runs and replies `"1"` on the response FIFO, Python reads the result from
-`/tmp/npu_out/.../output0.raw`. `web/infer_npu.py` implements the Python side behind the
-*same* `PaddleDetector` interface, so `server.py` runs the NPU with `--model npu` and the
-MJPEG loop is unchanged.
+Python quantizes the frame in numpy, writes the native `uint16` bytes to `/tmp/npu_in.raw`,
+sends `"r\n"` on the command FIFO; the daemon runs and replies `"1"` on the response FIFO;
+Python reads the raw `uint16` result from `/tmp/npu_out/.../output0.raw` and dequantizes it.
+`web/infer_npu.py` implements the Python side behind the *same* `PaddleDetector` interface,
+so `server.py` runs the NPU with `--model npu` and the MJPEG loop is unchanged.
 
 **Cross-compiling the daemon** (on the x86 box, targeting aarch64 — see
 `npu/build_daemon.sh` for the exact, working recipe):
@@ -442,32 +446,58 @@ Results on the IQ8-275:
 
 | | Latency | Throughput |
 |---|---|---|
-| CPU (onnxruntime), full pipeline | 42.3 ms | 23.7 FPS |
+| CPU (onnxruntime), full pipeline | 42.0 ms | 23.8 FPS |
 | NPU, **raw math only** | 1.7 ms | ~576 FPS |
-| NPU, **full pipeline** | 56.8 ms | 17.6 FPS |
+| NPU, **full pipeline** | **25.3 ms** | **39.5 FPS** |
 
-**The NPU is slower end-to-end**, despite 84×-faster math. To find out why, `yolo/diag_npu_timing.py`
-breaks down the NPU cycle:
+**The NPU wins end-to-end: 1.7× faster than the CPU**, with the identical detection
+(CPU box (224,177)-(383,363) p=0.742; NPU (224,177)-(382,363) p=0.746). But getting there
+took one fix — and the detour is the most instructive part of the whole project.
 
-| stage | time |
+### The trap: feeding the chip in the wrong format
+
+Naively, the NPU pipeline came out at ~57 ms — *slower* than the CPU, despite 84×-faster
+math. `yolo/diag_npu_timing.py` breaks down the NPU cycle to find out why. The A16W8 model
+runs on **16-bit integer activations**, so the float32 camera frame must be quantized to
+`uint16` on the way in and dequantized on the way out. The naive path let the SDK
+(`populateInputTensors` / `writeOutputTensors`) do that conversion **element by element on
+the CPU** — ~307k elements per frame in, ~10k out — which cost ~13 ms in + ~11 ms out:
+
+| stage (naive `g` path) | time |
 |---|---|
-| write input `.raw` (1.17 MB) | 4.1 ms |
-| signal FIFO | 0.1 ms |
-| **wait** (FIFO + daemon re-reads/re-parses the `.raw` + execute 1.7 ms + write out + FIFO back) | **30.0 ms** |
-| read output | 0.4 ms |
+| write input `.raw` (float32, 1.17 MB) | ~4 ms |
+| **wait** (daemon float→uint16 quantize ~13 ms + execute 1.7 ms + uint16→float dequantize ~11 ms) | ~31 ms |
+| read output | ~0.4 ms |
 
-**The lesson:** the NPU executes in 1.7 ms but is wrapped in ~30 ms of file+FIFO transport,
-dominated by the daemon **re-reading and re-quantizing the input file every frame**
-(`populateInputTensors` — a code path designed to read a list of files from disk, not to
-stream). The bottleneck is **moving the data, not the compute**. Hardware acceleration only
-wins when the delivery cost is less than the compute it saves — for a model this small, fed
-through files, it isn't.
+Note it is **not** disk I/O: `/tmp` on this board is a RAM `tmpfs`, so the file write is
+nearly free. The cost is the per-element conversion loop inside the SDK.
 
-**How you'd make the NPU actually win:** write the tensor into **shared memory**
-(ion/dmabuf) instead of a file, or keep persistent in-memory tensors so there's no re-parse
-per frame — or simply use a larger model where the 1.7 ms of saved compute dwarfs the
-transport. (Qualcomm's AI Hub ships YOLOv8 pre-optimized for this chip and solves the
-transport path out of the box — the natural next step.)
+### The fix: convert in vectorized numpy, hand the chip its native bytes
+
+The conversion math is simple and identical for every element —
+`q = round(x/scale − offset)` (clamp to `[0, 65535]`) and back `x = scale·(q + offset)`,
+where `scale`/`offset` are the tensor's quantization parameters. So we move it out of the
+per-element SDK loop and into **vectorized numpy** (the whole frame at once, sub-millisecond),
+and add a `'r'` (raw) command to the daemon that **memcpy's the already-native `uint16` bytes
+straight into the tensor buffer** and writes the raw `uint16` output back — no conversion in
+the hot loop at all. (`web/infer_npu.py` reads `scale`/`offset` from the daemon's `QUANT`
+startup banner so numpy matches the SDK's rounding exactly; the box comes out bit-for-bit the
+same.) The cycle now:
+
+| stage (raw `r` path) | time |
+|---|---|
+| quantize frame in numpy (vectorized) | ~8 ms |
+| write native `uint16` bytes | ~3 ms |
+| **wait** (daemon memcpy + execute 1.7 ms + write native out + FIFO) | ~9 ms |
+| read + dequantize in numpy | ~0.8 ms |
+
+**The lesson:** the NPU's raw math was 84× faster all along; the win only appeared once we
+stopped feeding it in the wrong format. An accelerator only pays off if the road to it isn't
+the bottleneck — and here the bottleneck was neither the compute nor the disk, but a
+format-conversion loop that had no business running per-element on the CPU. Feed the chip its
+native format and it wins. (For an even tighter path you'd hand the tensor over **shared
+memory** — ion/dmabuf — skipping the file entirely; Qualcomm's AI Hub ships YOLOv8
+pre-optimized for this chip and solves that transport out of the box — the natural next step.)
 
 ---
 
@@ -478,8 +508,9 @@ transport path out of the box — the natural next step.)
 2. **Fine-tune, don't build from zero.** YOLOv8n from COCO weights → mAP 0.98 and it works
    in the real room (Phase B).
 3. **Quantization has traps.** Plain INT8 crushed the score; A16W8 saved it (Step 7.3).
-4. **Measure end-to-end.** The 84×-faster NPU lost the real race to transport overhead —
-   and only honest measurement revealed it (Step 9).
+4. **Measure end-to-end, then fix the road.** The 84×-faster NPU first *looked* slower —
+   until measurement traced it to a per-element format conversion, not the chip. Fixing that
+   made the NPU win 1.7× end-to-end (Step 9).
 
 Every script referenced here is in this repo with English comments explaining the *why*.
 Start at [Step 1](#step-1) and go.

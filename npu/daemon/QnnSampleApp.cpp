@@ -8,6 +8,7 @@
 
 #include <inttypes.h>
 
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -23,6 +24,7 @@
 #include "QnnDlcUtils.hpp"
 #include "QnnSampleApp.hpp"
 #include "QnnSampleAppUtils.hpp"
+#include "QnnTypeMacros.hpp"
 #include "QnnWrapperUtils.hpp"
 
 using namespace qnn;
@@ -917,25 +919,27 @@ sample_app::StatusCode sample_app::QnnSampleApp::executeGraphs() {
 }
 
 // ============================================================================
-// runDaemon(): keeps the NPU context and tensors ALIVE and runs ONE
-// inference per command received on the FIFO. Solves the ~250ms/frame bottleneck
-// of the "cold" qnn-net-run (process spawn+init + context reload): here the
-// setup happens once and each frame only pays for the graphExecute (~1.7ms on V75).
+// runDaemon(): keeps the NPU context and tensors ALIVE and runs ONE inference
+// per command received on the FIFO. Solves the ~250ms/frame cost of a "cold"
+// qnn-net-run (process spawn+init + context reload): here setup happens once and
+// each frame pays only graphExecute (~1.7ms on the V75).
 //
-// Protocol (files + FIFOs, aligned with the "coordinate via file" philosophy):
-//   - Python writes the NCHW float32 frame to inFile and sends "g\n" on cmdFifo.
-//   - Daemon re-reads inFile (populateInputTensors), runs, writes the output to
-//     <outputPath>/Result_0/output0.raw (writeOutputTensors), and replies "1\n"
-//     on respFifo.
-//   - "q\n" on cmdFifo shuts the daemon down.
-// Reuses setupInputAndOutputTensors/populateInputTensors/writeOutputTensors —
-// exactly the same path already validated by executeGraphs().
+// Two per-frame paths:
+//   - 'g' (legacy file path): Python writes an NCHW float32 frame to inFile; the
+//     daemon re-reads + quantizes it (populateInputTensors), executes, then
+//     dequantizes + writes the output (writeOutputTensors). The (de)quantize runs
+//     element-by-element on the CPU (~13ms + ~11ms/frame) — that, not disk, is the
+//     bottleneck (/tmp is a RAM tmpfs).
+//   - 'r' (raw in-memory path): Python quantizes the input in vectorized numpy
+//     (sub-ms) and writes the already-native uint16 bytes; the daemon memcpy's them
+//     straight into the tensor buffer, executes, and writes the raw uint16 output
+//     back for numpy to dequantize. This is the fair comparison and it wins.
+// Protocol: "<mode>\n" on cmdFifo per frame, "1\n"/"0\n" on respFifo; "q\n" quits.
 // ============================================================================
 sample_app::StatusCode sample_app::QnnSampleApp::runDaemon(const std::string &cmdFifo,
                                                            const std::string &respFifo,
                                                            const std::string &inFile,
                                                            const std::string &outFile) {
-  (void)outFile;  // output goes to m_outputPath/Result_0/output0.raw
   const size_t graphIdx = 0;
   if (m_graphsCount == 0) {
     QNN_ERROR("runDaemon: no graph loaded");
@@ -959,16 +963,37 @@ sample_app::StatusCode sample_app::QnnSampleApp::runDaemon(const std::string &cm
     inputFileList[i].push_back(inFile);
   }
 
+  // --- RAW in-memory I/O path (the fair, fast path) ---------------------------
+  // The slow part of the file path is NOT disk (/tmp is a RAM tmpfs) — it is the
+  // per-element float<->uint16 (de)quantization the SDK runs on the CPU inside
+  // populateInputTensors/writeOutputTensors (~13ms + ~11ms/frame). We move that
+  // math to vectorized numpy on the Python side (sub-millisecond) and here just
+  // memcpy the already-native (uint16) bytes straight into / out of the tensor
+  // client buffers. We print the quant scale/offset once so Python can match.
+  Qnn_Tensor_t &inT  = inputs[0];
+  Qnn_Tensor_t &outT = outputs[0];
+  void  *inBuf   = QNN_TENSOR_GET_CLIENT_BUF(&inT).data;
+  size_t inBytes = QNN_TENSOR_GET_CLIENT_BUF(&inT).dataSize;
+  void  *outBuf  = QNN_TENSOR_GET_CLIENT_BUF(&outT).data;
+  size_t outBytes = QNN_TENSOR_GET_CLIENT_BUF(&outT).dataSize;
+  {
+    auto qi = QNN_TENSOR_GET_QUANT_PARAMS(&inT).scaleOffsetEncoding;
+    auto qo = QNN_TENSOR_GET_QUANT_PARAMS(&outT).scaleOffsetEncoding;
+    std::cerr << "QUANT in_scale=" << qi.scale << " in_offset=" << qi.offset
+              << " in_bytes=" << inBytes
+              << " out_scale=" << qo.scale << " out_offset=" << qo.offset
+              << " out_bytes=" << outBytes << std::endl;
+  }
+
   QNN_INFO("runDaemon: ready. context alive, waiting for commands on the FIFO.");
   std::cout << "DAEMON_READY" << std::endl;  // signal for Python
 
   auto returnStatus = StatusCode::SUCCESS;
   bool running      = true;
-  // Outer loop: reopen cmdFifo whenever all writers close (EOF).
-  // This works both if Python keeps the FIFO open for the whole session and
-  // if it reopens it per frame.
+  // Outer loop: reopen cmdFifo whenever all writers close (EOF). This works whether
+  // Python keeps the FIFO open for the whole session or reopens it per frame.
   while (running) {
-    std::ifstream cmd(cmdFifo);  // blocks until a writer opens the other side
+    std::ifstream cmd(cmdFifo);  // blocks until a writer opens the other end
     if (!cmd.is_open()) {
       QNN_ERROR("runDaemon: could not open cmdFifo %s", cmdFifo.c_str());
       returnStatus = StatusCode::FAILURE;
@@ -979,43 +1004,73 @@ sample_app::StatusCode sample_app::QnnSampleApp::runDaemon(const std::string &cm
     while (std::getline(cmd, line)) {
       if (line.empty()) continue;
       if (line[0] == 'q') { running = false; break; }  // quit
-      if (line[0] != 'g') continue;
+      // 'g' = file path (legacy, slow). 'r' = raw native memcpy path (fast).
+      if (line[0] != 'g' && line[0] != 'r') continue;
+      bool rawMode = (line[0] == 'r');
 
-      // 1) re-read the frame from inFile into the input tensor
-      iotensor::StatusCode iotStatus;
-      size_t numPop, batch;
-      std::tie(iotStatus, numPop, batch) =
-          m_ioTensor.populateInputTensors(graphIdx, inputFileList, 0, false,
-                                          m_inputNameToIndex[graphIdx], inputs, graphInfo,
-                                          m_inputDataType);
-      bool ok = (iotensor::StatusCode::SUCCESS == iotStatus);
+      using clk = std::chrono::steady_clock;
+      auto t0 = clk::now();
 
-      // 2) run on the NPU
+      bool ok = true;
+      // 1) load the frame into the input tensor
+      if (rawMode) {
+        // read exactly inBytes of already-quantized uint16 straight into the buffer
+        std::ifstream f(inFile, std::ios::binary);
+        f.read(reinterpret_cast<char*>(inBuf), inBytes);
+        ok = (f.gcount() == (std::streamsize)inBytes);
+      } else {
+        iotensor::StatusCode iotStatus;
+        size_t numPop, batch;
+        std::tie(iotStatus, numPop, batch) =
+            m_ioTensor.populateInputTensors(graphIdx, inputFileList, 0, false,
+                                            m_inputNameToIndex[graphIdx], inputs, graphInfo,
+                                            m_inputDataType);
+        ok = (iotensor::StatusCode::SUCCESS == iotStatus);
+      }
+      auto t1 = clk::now();
+
+      // 2) execute on the NPU
       if (ok) {
         Qnn_ErrorHandle_t e = m_qnnFunctionPointers.qnnInterface.graphExecute(
             graphInfo.graph, inputs, graphInfo.numInputTensors, outputs,
             graphInfo.numOutputTensors, m_profileBackendHandle, nullptr);
         ok = (QNN_GRAPH_NO_ERROR == e);
       }
+      auto t2 = clk::now();
 
-      // 3) write the output (Result_0/output0.raw inside m_outputPath)
+      // 3) write the output
       if (ok) {
-        if (iotensor::StatusCode::SUCCESS !=
-            m_ioTensor.writeOutputTensors(graphIdx, 0, graphInfo.graphName, outputs,
-                                          graphInfo.numOutputTensors, m_outputDataType,
-                                          m_graphsCount, m_outputPath, numPop, batch)) {
-          ok = false;
+        if (rawMode) {
+          // write the native uint16 bytes straight out; Python dequantizes (numpy)
+          std::ofstream f(outFile, std::ios::binary);
+          f.write(reinterpret_cast<char*>(outBuf), outBytes);
+          ok = f.good();
+        } else {
+          size_t numPop = 1, batch = 1;
+          ok = (iotensor::StatusCode::SUCCESS ==
+                m_ioTensor.writeOutputTensors(graphIdx, 0, graphInfo.graphName, outputs,
+                                              graphInfo.numOutputTensors, m_outputDataType,
+                                              m_graphsCount, m_outputPath, numPop, batch));
         }
       }
+      auto t3 = clk::now();
 
-      // 4) reply to Python (reopen every frame: the Python reader closes between frames)
+      auto us = [](clk::time_point a, clk::time_point b) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
+      };
+      std::cerr << "TIMING mode=" << (rawMode ? "raw" : "file")
+                << " load=" << us(t0, t1)
+                << " execute=" << us(t1, t2)
+                << " store=" << us(t2, t3) << " ms" << std::endl;
+
+      // 4) reply to Python (reopened each frame: the Python reader closes between frames)
       {
         std::ofstream resp(respFifo);
         resp << (ok ? "1" : "0") << std::endl;
       }
       if (!ok) {
         QNN_ERROR("runDaemon: failed to process frame");
-        // keep looping anyway (don't take down the daemon over 1 bad frame)
+        // keep looping anyway (don't take the daemon down over one bad frame)
       }
     }
     // EOF: writer closed. Reopen at the top of the while (unless 'q' arrived).

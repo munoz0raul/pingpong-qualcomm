@@ -11,9 +11,18 @@ the NPU is the native C++ runtime (adapted SampleApp). But spinning up the proce
 context from the .bin costs ~250ms — unviable per frame. Solution: a C++ daemon that loads the
 context ONCE and stays alive, running 1 inference per command. Here the Python:
     1. starts the daemon once (subprocess), waits for "DAEMON_READY"
-    2. per frame: writes the input .raw -> signals "g" on cmd_fifo
-                  -> waits for the response on resp_fifo -> reads output0.raw -> decode+NMS
-The pure graphExecute is ~1.7ms; the rest is file I/O (fast, all in /tmp/tmpfs).
+    2. per frame: writes the (pre-quantized) input -> signals the daemon
+                  -> waits for the response -> reads the raw output -> dequantize -> decode+NMS
+
+** The in-memory ("raw") path — the fair comparison **
+The A16W8 model runs on 16-bit activations, so the NPU wants uint16, not float32. The naive path
+hands the daemon a float32 frame and lets the SDK convert float<->uint16 element-by-element on the
+CPU (~13ms in + ~11ms out per frame) — that CPU conversion, NOT the disk (/tmp is a RAM tmpfs), is
+what buried the pure ~6ms NPU compute. Here we quantize the input and dequantize the output in
+VECTORIZED numpy (sub-millisecond) and hand the daemon the already-native uint16 bytes, which it
+just memcpy's straight into / out of the tensor buffer. Same math, same result — but the NPU now
+wins end-to-end. We read the tensors' quant scale/offset from the daemon's startup banner so numpy
+matches the SDK's rounding exactly.
 
 ** Pre-processing and decode: IDENTICAL to infer_yolo.py **
 Same letterbox (320, gray 114), same /255+CHW, same output (1,5,2100) and same
@@ -60,6 +69,8 @@ class PaddleDetector:
         self.npu_dir = npu_dir
         self.onnx_path = os.path.join(npu_dir, context_bin)   # only for logging; it's the .bin, not .onnx
         self.proc = None
+        # quant params (scale/offset + byte sizes) parsed from the daemon's startup banner
+        self.quant = None
 
         self._setup_fifos()
         self._start_daemon(context_bin)
@@ -106,6 +117,8 @@ class PaddleDetector:
             text=True, bufsize=1,
         )
         # wait for "DAEMON_READY" (context loaded). Generous timeout: init ~a few s.
+        # Along the way the daemon prints a "QUANT ..." banner (input/output scale, offset,
+        # byte sizes) that we parse so numpy can quantize/dequantize exactly like the SDK.
         t0 = time.time()
         while time.time() - t0 < 60:
             if self.proc.poll() is not None:
@@ -114,11 +127,32 @@ class PaddleDetector:
             line = self.proc.stdout.readline()
             if not line:
                 continue
+            if line.startswith("QUANT "):
+                self.quant = self._parse_quant(line)
             if "DAEMON_READY" in line:
+                if self.quant is None:
+                    raise RuntimeError("daemon did not print the QUANT banner before DAEMON_READY")
                 # drain the rest of stdout in the background so the buffer doesn't fill and stall
                 threading_drain(self.proc.stdout)
                 return
         raise RuntimeError("daemon did not signal DAEMON_READY within 60s")
+
+    @staticmethod
+    def _parse_quant(line):
+        """Parse 'QUANT in_scale=.. in_offset=.. in_bytes=.. out_scale=.. out_offset=.. out_bytes=..'."""
+        kv = {}
+        for tok in line.split()[1:]:
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                kv[k] = v
+        return {
+            "in_scale": float(kv["in_scale"]),
+            "in_offset": int(float(kv["in_offset"])),
+            "in_bytes": int(kv["in_bytes"]),
+            "out_scale": float(kv["out_scale"]),
+            "out_offset": int(float(kv["out_offset"])),
+            "out_bytes": int(kv["out_bytes"]),
+        }
 
     # -------------------------------------------------------------- inference
     def _preprocess(self, frame_bgr):
@@ -128,15 +162,31 @@ class PaddleDetector:
         return chw, scale, padx, pady
 
     def _run_npu(self, chw):
-        """Write the frame, signal the daemon, wait for the response, read the raw output."""
-        chw.astype(np.float32).tofile(IN_FILE)          # frame -> file
-        self._cmd.write("g\n")                          # trigger 1 inference
+        """In-memory ("raw") path: quantize in numpy, hand the daemon native uint16 bytes,
+        wait for the reply, read the raw uint16 output, dequantize in numpy.
+
+        The float<->uint16 conversion is exactly the SDK's, but vectorized (sub-ms) instead of
+        the SDK's per-element CPU loops. Quantize: q = round(x/scale - offset), clamp [0,65535].
+        Dequantize: x = scale * (q + offset). scale/offset come from the daemon's QUANT banner.
+        """
+        q = self.quant
+        # quantize the float32 frame -> uint16 (native tensor layout, same order the SDK expects):
+        # q = round(x/scale - offset), clamp [0, 65535]. Vectorized numpy = sub-ms; the SDK did this
+        # element-by-element on the CPU (~13ms/frame), which is what buried the NPU on the old path.
+        qin = np.rint(chw.astype(np.float32).ravel() / q["in_scale"] - q["in_offset"])
+        qin = np.clip(qin, 0, 65535).astype(np.uint16)
+        qin.tofile(IN_FILE)                             # already-native bytes -> file (RAM tmpfs)
+
+        self._cmd.write("r\n")                          # 'r' = raw in-memory path
         self._cmd.flush()
         with open(RESP_FIFO, "r") as r:                 # block until the daemon responds
             ans = r.readline().strip()
         if ans != "1":
             raise RuntimeError(f"daemon reported an inference failure (resp={ans!r})")
-        out = np.fromfile(OUT_RAW, dtype=np.float32)
+
+        # read the raw uint16 output and dequantize in numpy: x = scale * (q + offset)
+        qout = np.fromfile(OUT_RAW, dtype=np.uint16)
+        out = (qout.astype(np.float32) + q["out_offset"]) * q["out_scale"]
         return out.reshape(1, N_CHANNELS, N_ANCHORS)
 
     def detect(self, frame_bgr):
