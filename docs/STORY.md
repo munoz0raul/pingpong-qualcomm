@@ -3,6 +3,16 @@
 *Written to be understood by someone who has never touched a line of code or heard the
 words "neural network." No jargon survives more than one sentence without being explained.*
 
+A tiny glossary before we start:
+
+- **Dataset** — the example photos plus the answer for each photo.
+- **Label** — the answer drawn on one photo, here a rectangle around the paddle.
+- **Model** — the computer program that learns patterns from the dataset.
+- **Training** — showing examples to the model until it improves.
+- **Inference** — using the trained model on a new image.
+- **CPU** — the normal general-purpose processor.
+- **NPU** — a special processor built to run AI math faster and with less power.
+
 ---
 
 ## What we set out to do
@@ -13,11 +23,11 @@ does effortlessly. For a computer it is genuinely hard, and the *way* it's hard 
 interesting part.
 
 There was a second goal hiding behind the first. The computer I wanted this to run on
-isn't a big desktop. It's a small **edge board** from Qualcomm — the kind of chip that
-goes inside a phone, a doorbell camera, or a car. These chips have a special piece of
-silicon just for AI, called an **NPU** (Neural Processing Unit). I wanted to actually
-use it. So the real journey was: build something that works, then make it run fast on a
-tiny piece of hardware.
+isn't a big desktop. It's a small **IQ-8275 EVK edge board** from Qualcomm — the kind of
+chip that goes inside a phone, a doorbell camera, or a car. These chips have a special
+piece of silicon just for AI, called an **NPU** (Neural Processing Unit). I wanted to
+actually use it. So the real journey was: build something that works, then make it run
+fast on a tiny piece of hardware.
 
 ---
 
@@ -105,8 +115,10 @@ from-scratch brain. Same photos, same computer, same amount of my effort. The on
 that changed was **starting from a model that had already seen the world.**
 
 To put a number on "how good": the from-scratch brain scored about **0.56** on our
-accuracy measure; the fine-tuned YOLO scored about **0.98** (where 1.0 is perfect). But
-the number that mattered most was simply: *it works in my actual room now.*
+accuracy measure; the fine-tuned YOLO scored about **0.98** (where 1.0 is perfect). You
+do not need the exact formula here — just remember that higher is better, and 1.0 means
+nearly perfect. But the number that mattered most was simply: *it works in my actual room
+now.*
 
 > **The one thing to remember from Part 3:** don't build from zero if a giant has
 > already done 99% of the work for free. Fine-tuning a big pre-trained model beat my

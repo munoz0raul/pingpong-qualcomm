@@ -32,8 +32,8 @@ turnkey. Each of those steps says exactly what it assumes.
 **Hardware**
 - A Mac with Apple Silicon (M1/M2/M3…) for training. (Any machine with PyTorch works;
   the `--device mps` flag is Mac-specific — use `cpu` elsewhere.)
-- A **Qualcomm IQ8-275 EVK** board (QCS8300, Hexagon **V75** NPU), or a similar Qualcomm
-  board. It runs Linux, aarch64, Python 3.14, with `onnxruntime` preinstalled.
+- A **Qualcomm IQ-8275 EVK** board (QCS8300, Hexagon **V75** NPU), or a similar
+  Qualcomm board. It runs Linux, aarch64, Python 3.14, with `onnxruntime` preinstalled.
 - A USB webcam for the live demo. (Mine was an EMEET SmartCam; on the board it showed up
   as `/dev/video26`.)
 - An **x86-64 Linux machine** to run Qualcomm's conversion toolkit (the QAIRT SDK is
@@ -46,6 +46,12 @@ turnkey. Each of those steps says exactly what it assumes.
   `qairt-quantizer`, `qnn-context-binary-generator`, and `qnn-net-run`.
 - To build the live-NPU C++ daemon: an aarch64 cross-compiler
   (`aarch64-linux-gnu-g++-13`). [Step 8](#step-8) covers this.
+
+**Known-good versions from a full reproduction**
+- Python 3.9 on macOS for training/export, Python 3.14 on the board for inference.
+- Ultralytics 8.4.94, ONNX 1.19.x/1.22.x, onnxruntime 1.19.x on Mac and 1.27.x on the board.
+- QAIRT SDK 2.47.0.260601.
+- Qualcomm Hexagon HTP target: **V75** (`"htp_arch": "v75"`).
 
 ---
 
@@ -91,6 +97,23 @@ cd pingpong-qualcomm
 # Put your Edge Impulse export here (the code looks for training/ and testing/ inside it):
 #   pingpong-qualcomm/pingpong-export/training/...
 #   pingpong-qualcomm/pingpong-export/testing/...
+```
+
+If you have the Edge Impulse zip file, unpack it like this:
+
+```bash
+mkdir -p pingpong-export
+unzip /path/to/pingpong-export.zip -d pingpong-export
+```
+
+Sanity-check the dataset before training. For the dataset used in this write-up you should see
+`539` training images and `124` testing images:
+
+```bash
+python3 training/labels.py
+# expected:
+# [training] 539 images  |  with paddle: 295  |  background: 244
+# [testing] 124 images   |  with paddle: 76   |  background: 48
 ```
 
 We use **two separate virtual environments** on purpose: Phase A (a lean PyTorch setup)
@@ -209,8 +232,14 @@ leakage: they were distinct splits to begin with). Background images get an **em
 ### 4.3 Fine-tune
 
 ```bash
-yolo/.venv/bin/python yolo/train_yolo.py --epochs 80
-# (defaults: yolov8n.pt base, imgsz=320, batch=16, device=mps)
+# Apple Silicon Mac (default, uses Metal/MPS):
+yolo/.venv/bin/python yolo/train_yolo.py --epochs 80 --device mps
+
+# If you are reproducing on Linux/Ubuntu without a GPU, use CPU instead:
+# yolo/.venv/bin/python yolo/train_yolo.py --epochs 80 --device cpu
+
+# If you are reproducing on Linux with an NVIDIA GPU, use CUDA device 0:
+# yolo/.venv/bin/python yolo/train_yolo.py --epochs 80 --device 0
 ```
 
 - **`imgsz=320`** matches Phase A and what we'll run on the board. Ultralytics letterboxes
@@ -282,15 +311,24 @@ changes. This one decision makes Steps 6–8 painless.
 
 ## Step 6 — Run on the Qualcomm board's CPU<a name="step-6"></a>
 
-Now move to the board. SSH in (my board: `192.168.15.86`, user/pass provided with the
-EVK):
+Now move to the board. First find its IP address. From the board's serial console or
+local terminal:
 
 ```bash
-# from the Mac — copy the model and the web/ code to the board
-scp yolo/best.onnx  root@192.168.15.86:/opt/pingpong/yolo/
-scp web/*.py        root@192.168.15.86:/opt/pingpong/web/
+ip addr show end0    # Ethernet
+ip addr show wlp1s0  # Wi-Fi, if configured
+```
 
-ssh root@192.168.15.86
+In my setup the board was `192.168.15.86` (user: `root`; password comes with the EVK image).
+From the Mac, create the target folders and copy the model and `web/` code:
+
+```bash
+BOARD_IP=192.168.15.86
+ssh root@$BOARD_IP 'mkdir -p /opt/pingpong/yolo /opt/pingpong/web'
+scp yolo/best.onnx  root@$BOARD_IP:/opt/pingpong/yolo/
+scp web/*.py        root@$BOARD_IP:/opt/pingpong/web/
+
+ssh root@$BOARD_IP
 ```
 
 The board already has `onnxruntime` (Python 3.14, aarch64). Because inference is just
@@ -343,7 +381,35 @@ qairt-converter --input_network best.onnx --output_path best_fp.dlc
 range by running the model on **real images**, which must go through the *exact* same
 preprocessing as inference. `yolo/gen_calib.py` produces ~200 `.raw` files (float32 NCHW,
 letterboxed 320² — reusing `_letterbox` from `infer_yolo.py` so it's bit-identical) plus
-an `input_list.txt`. Run it on the Mac, copy the `calib/` folder to the x86 box.
+an `input_list.txt`.
+
+Run it on the Mac:
+
+```bash
+yolo/.venv/bin/python yolo/gen_calib.py
+# -> yolo/calib/calib_0000.raw ... calib_0199.raw
+# -> yolo/calib/input_list.txt
+```
+
+Then copy the ONNX and calibration folder to the x86 QAIRT machine. Keep the same relative
+layout (`best.onnx` next to a `calib/` folder):
+
+```bash
+# from the Mac
+rsync -av yolo/best.onnx yolo/calib user@x86-linux:/path/to/qairt-work/
+
+# on the x86 QAIRT machine
+cd /path/to/qairt-work
+```
+
+The generated `input_list.txt` intentionally uses portable relative paths like
+`calib/calib_0000.raw`. If you generate your own list with absolute Mac paths and then copy
+it to Linux, `qairt-quantizer` will fail with `Failed to open input file: /Users/...`.
+If that happens, regenerate the list on the x86 box:
+
+```bash
+find "$PWD/calib" -name 'calib_*.raw' | sort > calib/input_list.txt
+```
 
 **7.3 — Quantize → the A16W8 trap.** This is the subtle part. `qairt-quantizer` converts
 the float model to small integers so the NPU runs fast. See `npu/requant_a16w8.sh`:
@@ -367,15 +433,37 @@ qairt-quantizer \
 **7.4 — Build the NPU context binary.** `qnn-context-binary-generator` compiles the
 quantized DLC into a `.bin` pre-optimized for the **Hexagon V75** HTP. This needs a small
 JSON config naming the graph and target arch (`"htp_arch": "v75"`). See
-`npu/requant_a16w8.sh` (it does 7.3 and 7.4 together) and `npu/gen_ctx2.sh`:
+`npu/requant_a16w8.sh` (it does 7.3 and 7.4 together) and `npu/gen_ctx2.sh`.
+
+Minimal version of the config files (edit `$SDK` to your QAIRT install path):
 
 ```bash
+SDK=/path/to/qairt/2.47.0.260601
+
+cat > htp_config.json <<'JSON'
+{
+  "graphs": [ { "graph_names": ["best_a16w8"], "vtcm_mb": 0, "O": 3 } ],
+  "devices": [ { "htp_arch": "v75" } ]
+}
+JSON
+
+cat > backend_ext.json <<JSON
+{
+  "backend_extensions": {
+    "shared_library_path": "$SDK/lib/x86_64-linux-clang/libQnnHtpNetRunExtensions.so",
+    "config_file_path": "$PWD/htp_config.json"
+  }
+}
+JSON
+
+mkdir -p ctx16
 qnn-context-binary-generator \
   --dlc_path best_a16w8.dlc \
-  --backend libQnnHtp.so \
+  --backend "$SDK/lib/x86_64-linux-clang/libQnnHtp.so" \
+  --output_dir ctx16 \
   --binary_file best_a16w8_htpv75 \
   --config_file backend_ext.json
-# -> best_a16w8_htpv75.bin
+# -> ctx16/best_a16w8_htpv75.bin
 ```
 
 Copy `best_a16w8_htpv75.bin` and the runtime `.so` libraries from the SDK to the board
@@ -429,7 +517,20 @@ so `server.py` runs the NPU with `--model npu` and the MJPEG loop is unchanged.
 **Cross-compiling the daemon** (on the x86 box, targeting aarch64 — see
 `npu/build_daemon.sh` for the exact, working recipe). The daemon is Qualcomm's SampleApp
 sources plus our `runDaemon()`; you compile them against the SDK headers with an aarch64
-cross-compiler. The variables below (spelled out in full in `build_daemon.sh`):
+cross-compiler.
+
+Important: this repo contains the **modified daemon files**, not the full Qualcomm
+SampleApp source tree. To rebuild the daemon from scratch:
+
+1. Locate/copy the QAIRT SDK SampleApp source tree on the x86 machine.
+2. Overlay the files from this repo:
+   - `npu/daemon/main.cpp` -> `src/main.cpp`
+   - `npu/daemon/QnnSampleApp.cpp` -> `src/QnnSampleApp.cpp`
+   - `npu/daemon/QnnSampleApp.hpp` -> `src/QnnSampleApp.hpp`
+3. Keep the SampleApp support directories (`Log/`, `PAL/`, `Utils/`, `WrapperUtils/`).
+4. Then compile with the command below or adapt `npu/build_daemon.sh`.
+
+The variables below (spelled out in full in `build_daemon.sh`):
 
 - `$R` — the sysroot of your aarch64 cross toolchain (where `aarch64-linux-gnu-g++-13` and
   its libs live).
@@ -465,12 +566,20 @@ keeps the command FIFO open for the whole session, and cleanly sends `"q"` on sh
 Measure the *whole* `.detect()` call (preprocess + inference + postprocess) — that's what
 the live stream actually pays per frame — for both engines on the same frame.
 
+The benchmark script expects a test image at `/tmp/emeet2.jpg`. Use the original hard frame
+if you have it, or copy any representative paddle frame there. The exact numbers below are
+from the original `emeet2.jpg`; a different image should still show the same CPU/NPU shape
+but may print a different box/confidence.
+
 ```bash
+# from the Mac, if you have a test frame locally
+scp path/to/emeet2.jpg root@$BOARD_IP:/tmp/emeet2.jpg
+
 # on the board (stop the web server first — it contends for the NPU/FIFOs)
 python3 yolo/bench_cpu_vs_npu.py
 ```
 
-Results on the IQ8-275:
+Results on the IQ-8275 EVK:
 
 | | Latency | Throughput |
 |---|---|---|

@@ -3,7 +3,7 @@
 Export of the trained model: best.pt -> best.onnx (Phase A5).
 
 Why ONNX?  The .pt is a PyTorch format — to run it you need the whole PyTorch
-installed. The board (IQ8-275) runs inference with onnxruntime, which is light
+installed. The board (IQ-8275 EVK) runs inference with onnxruntime, which is light
 and reads the .onnx format (a portable operation graph, framework-independent).
 Exporting once on the Mac and running anywhere (Mac, board CPU, later NPU) is
 exactly the idea: TRAIN in one place, INFER in another.

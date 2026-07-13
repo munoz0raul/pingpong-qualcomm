@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # reuse EVERYTHING from the YOLO post-processing (letterbox, nms, Detection, decode)
 from infer_yolo import _letterbox, _nms, Detection, IMG_SIZE
 
-# --- board defaults (IQ8-275) ---
+# --- board defaults (IQ-8275 EVK) ---
 NPU_DIR = "/home/weston/npu"                         # where daemon + .bin + libs live
 DAEMON_BIN = "qnn-daemon-aarch64"
 CONTEXT_BIN = "best_a16w8_htpv75.bin"

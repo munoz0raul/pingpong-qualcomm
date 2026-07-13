@@ -5,6 +5,10 @@
 #
 # ultralytics already pulls in torch, torchvision, opencv-python, numpy, pyyaml, etc.
 # onnx/onnxruntime come in for the export and the inference test.
+# onnxslim is used by Ultralytics during ONNX export; listing it here avoids
+# an implicit auto-install in the middle of export_yolo.py. Keep it unpinned so
+# Ultralytics can evolve its minimum version requirement.
 ultralytics
 onnx
 onnxruntime
+onnxslim

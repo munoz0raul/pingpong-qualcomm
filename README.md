@@ -1,7 +1,7 @@
 # pingpong-qualcomm
 
 Teaching a computer to recognize a **ping-pong paddle** — from an empty folder to a
-live camera feed running on a **Qualcomm NPU** (the AI chip on a Qualcomm IQ8-275
+live camera feed running on a **Qualcomm NPU** (the AI chip on a Qualcomm IQ-8275 EVK
 edge board).
 
 This repo is the complete, honest record of that journey: every model, every script,
@@ -54,7 +54,7 @@ docs/       The two write-ups (STORY.md and REPRODUCE.md)
 ## The hardware
 
 - **Training:** a Mac (Apple Silicon, PyTorch + MPS/Metal). Models are always *trained* here.
-- **Inference:** a **Qualcomm IQ8-275 EVK** edge board (QCS8300, Hexagon V75 NPU, aarch64,
+- **Inference:** a **Qualcomm IQ-8275 EVK** edge board (QCS8300, Hexagon V75 NPU, aarch64,
   Python 3.14). Models are *run* here — first on its CPU, then on its NPU.
 
 ## Results at a glance
