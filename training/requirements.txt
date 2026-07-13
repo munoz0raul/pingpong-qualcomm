@@ -7,3 +7,5 @@ torchvision
 numpy
 opencv-python-headless
 onnx           # required for export_onnx.py
+onnxruntime    # required for the ONNX-vs-PyTorch sanity check in export_onnx.py
+onnxscript     # required by newer PyTorch ONNX exporters on some platforms
