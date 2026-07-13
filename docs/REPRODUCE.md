@@ -1,9 +1,13 @@
 # Reproduce it yourself, end to end
 
-This is the full, no-steps-hidden guide. If you can copy-paste into a terminal, you can
-reproduce everything in this repo — from an empty folder to live paddle detection on a
-Qualcomm NPU. No prior AI experience assumed. Every command is here; every script it
-calls is in this repo and its comments are in English.
+This is the full, no-steps-hidden guide, from an empty folder to live paddle detection on
+a Qualcomm NPU. No prior AI experience assumed. Every command is here; every script it
+calls is in this repo with English comments.
+
+**Phases A and B (Steps 1–6) are copy-paste** on a Mac + the board. **Phases C and D
+(Steps 7–9)** — the Qualcomm NPU part — need the (free) QAIRT SDK, an x86 Linux box, and a
+little comfort editing paths in a shell script; they're a *worked reference* rather than
+turnkey. Each of those steps says exactly what it assumes.
 
 **What you'll go through:**
 
@@ -118,8 +122,12 @@ center `cx,cy` and size `w,h` are **normalized 0–1** (this normalization, in
 `box_to_target()`, is reused everywhere later).
 
 ```bash
-training/.venv/bin/python training/preprocess.py 'pingpong-export/*'
+training/.venv/bin/python training/preprocess.py
 ```
+
+It finds the export on its own (through `labels.py`, which knows the `pingpong-export/`
+layout) and caches both splits. Add `--force` to rebuild an existing cache, or
+`--splits training testing` to pick specific splits.
 
 ### 3.2 Train
 
@@ -135,20 +143,17 @@ Key design choices, all in `train.py` with comments explaining why:
   leak almost-copies into validation and give a dishonestly high score.
 - **Balanced accuracy + weighted loss** so the model can't cheat by always guessing the
   majority class.
-- Saves `training/checkpoints/best.pt` and `metrics.json`.
+- Prints `val_IoU` every epoch and saves the best model + `metrics.json` under
+  `training/checkpoints/`.
 
-The honest accuracy measure for a box is **IoU** (Intersection-over-Union: how much the
-predicted box overlaps the true box, 0=miss, 1=perfect). Phase A tops out around
-**IoU 0.56**.
+### 3.3 Read the result
 
-### 3.3 Evaluate (look at it with your own eyes)
-
-```bash
-training/.venv/bin/python training/eval.py --ckpt training/checkpoints/best.pt
-```
-
-This writes a visual grid (real box vs predicted box) so you can *see* where it errs —
-far more informative than a single number.
+There is no separate eval script in Phase A — `train.py` evaluates on the validation
+split every epoch and prints it live. Watch the `val_IoU` figure: it's the honest quality
+measure for a box (Intersection-over-Union: how much the predicted box overlaps the true
+one, 0=miss, 1=perfect). It tops out around **IoU 0.56**. The full history is saved to
+`training/checkpoints/metrics.json`, and the best checkpoint to
+`training/checkpoints/best.pt`.
 
 ### 3.4 Export to ONNX (the portable format for the board)
 
@@ -225,8 +230,11 @@ The score here is **mAP@0.5** (the standard detection metric). Phase B reaches
 ### 4.4 Export to ONNX
 
 ```bash
-yolo/.venv/bin/python yolo/export_yolo.py   # -> yolo/best.onnx
+yolo/.venv/bin/python yolo/export_yolo.py   # reads runs/paddle/weights/best.pt -> yolo/best.onnx
 ```
+
+(It defaults to the `runs/paddle/weights/best.pt` that 4.3 just produced; pass
+`--ckpt <path>` to export a different one.)
 
 Important choice: **`nms=False`** — we do **not** bake the final NMS step into the graph.
 NMS uses operations not every NPU backend supports. We do decode + NMS in plain numpy in
@@ -310,6 +318,17 @@ You'll get ~24 FPS end-to-end on the CPU. That's your **CPU baseline**.
 
 This all happens on the **x86-64 Linux machine** with the QAIRT SDK installed. The scripts
 are in `npu/`. Copy `yolo/best.onnx` and your calibration data to that machine first.
+
+> ⚠️ **Honesty note for Steps 7–8.** Unlike Phases A/B, these are *not* pure copy-paste.
+> The `npu/*.sh` scripts contain **absolute paths from my machine** (e.g.
+> `/local/mnt/workspace/qairt/...`) and assume the QAIRT SDK is installed and on your
+> `PATH`. Treat them as a **worked reference**, not a turnkey script: read each one, then
+> set `SDK=<your QAIRT install>` and adjust the paths to your box. The commands below show
+> the essential call for each stage; the scripts wrap them with those machine-specific
+> paths. You also need Qualcomm's runtime libraries — from the SDK, the ones that end up on
+> the board are `libQnnHtp.so`, `libQnnSystem.so`, `libQnnHtpNetRunExtensions.so`, and the
+> matching HTP **V75** skel/stub libs (`libQnnHtpV75*.so`), all from
+> `<SDK>/lib/aarch64-*/` and `<SDK>/lib/hexagon-v75/`.
 
 The NPU can't run the float ONNX directly. Three transformations:
 
@@ -408,7 +427,16 @@ Python reads the raw `uint16` result from `/tmp/npu_out/.../output0.raw` and deq
 so `server.py` runs the NPU with `--model npu` and the MJPEG loop is unchanged.
 
 **Cross-compiling the daemon** (on the x86 box, targeting aarch64 — see
-`npu/build_daemon.sh` for the exact, working recipe):
+`npu/build_daemon.sh` for the exact, working recipe). The daemon is Qualcomm's SampleApp
+sources plus our `runDaemon()`; you compile them against the SDK headers with an aarch64
+cross-compiler. The variables below (spelled out in full in `build_daemon.sh`):
+
+- `$R` — the sysroot of your aarch64 cross toolchain (where `aarch64-linux-gnu-g++-13` and
+  its libs live).
+- `$INCLUDES` — `-Isrc ... -I$SDK/include/QNN` (the SampleApp source tree + the SDK's QNN
+  headers).
+- `$SRCS` — `src/main.cpp src/QnnSampleApp.cpp` plus the SampleApp support dirs
+  (`Log/`, `PAL/`, `Utils/`, `WrapperUtils/`).
 
 ```bash
 aarch64-linux-gnu-g++-13 -std=c++17 --sysroot="$R" \
