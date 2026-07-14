@@ -232,6 +232,10 @@ class StreamState:
         self.lock = threading.Lock()
         self.running = False
         self.index = None
+        # bumped on every start(); a stream loop remembers the generation it was
+        # serving and only releases the camera if it's still the current one — so a
+        # late-dying old connection can't tear down a camera a newer start() just opened.
+        self.generation = 0
 
     def start(self, index, width, height, fps):
         with self.lock:
@@ -248,14 +252,20 @@ class StreamState:
             self.cap = cap
             self.running = True
             self.index = index
+            self.generation += 1
             return {
                 "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                 "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
                 "fps": int(round(cap.get(cv2.CAP_PROP_FPS))) or fps,
+                "generation": self.generation,
             }
 
-    def stop(self):
+    def stop(self, generation=None):
+        """Release the camera. If `generation` is given, only stop when it's still the
+        current session — lets a stream's cleanup fire without clobbering a newer start()."""
         with self.lock:
+            if generation is not None and generation != self.generation:
+                return
             self.running = False
             if self.cap is not None:
                 self.cap.release()
@@ -339,6 +349,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Cache-Control", "no-cache, private")
         self.end_headers()
+        my_gen = self.state.generation      # the session this stream is serving
         try:
             while self.state.running:
                 frame = self.state.read()
@@ -357,6 +368,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"\r\n")
         except (BrokenPipeError, ConnectionResetError):
             pass       # browser closed the tab / hit stop — normal end
+        finally:
+            # ALWAYS release the camera when the stream ends — whether the user hit stop,
+            # closed the tab, or the connection just dropped. Without this, a closed tab
+            # leaves state.running=True and /dev/videoN held open forever (the "camera
+            # stuck / not found" bug): the next /api/cameras sees a busy device it can't
+            # reopen. Releasing here makes the explicit Stop button optional, not required.
+            # Pass my_gen so a late-dying old stream can't close a camera a newer start() opened.
+            self.state.stop(generation=my_gen)
 
 
 def main():
