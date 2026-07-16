@@ -25,6 +25,23 @@ turnkey. Each of those steps says exactly what it assumes.
 > one.* All training happens on a Mac (PyTorch + Apple's MPS/Metal). All inference —
 > first on CPU, then NPU — happens on the board.
 
+### The four big moves (the mental map)
+
+Nine steps sounds like a lot. It's really just **four moves**, and the thing that trips
+people up most — *which machine am I on right now?* — is answered in the third column.
+Keep this table in mind and every step has an obvious home:
+
+| Move | What happens | Where it runs | Steps |
+|------|--------------|---------------|-------|
+| **1. Get the data** | collect photos, draw a box on each | your computer (Edge Impulse) | 1–2 |
+| **2. Train on the Mac** | teach the model, export it to ONNX | **Mac** (PyTorch/MPS) | 3–4 |
+| **3. Run live on CPU** | webcam → detection → browser | **Mac first, then the IQ-8275 CPU** | 5–6 |
+| **4. Accelerate on the NPU** | convert the model, run it on the AI chip | **x86 Linux (convert) + board (run)** | 7–9 |
+
+Moves 1–3 (Steps 1–6) are **copy-paste** on a Mac and the board. Move 4 (Steps 7–9) is
+the Qualcomm NPU part — a *worked reference* that needs the free QAIRT SDK and an x86
+Linux box. Every step below says exactly which machine it assumes.
+
 ---
 
 ## What you need
@@ -85,6 +102,20 @@ The label boxes are in **absolute pixels**, with `x,y` = the **top-left corner**
 Remember that — different tools use different conventions, and getting it wrong silently
 ruins training. `training/labels.py` is the single place that reads this format; every
 other script goes through it.
+
+> **What this does:** turns one hand-drawn box into the numbers the network learns.
+> **Why it matters:** a box on screen is a corner + a width in pixels; a network trains
+> better on a **center point** that's **normalized 0–1** (independent of image size).
+> This exact conversion is reused in Phase B and again for NPU calibration — get it right
+> once, everywhere benefits.
+> **In the code:** `training/preprocess.py:box_to_target()`
+> ```python
+> cx = (box.x + box.w / 2.0) / img_w      # top-left x  ->  center x, as a fraction
+> cy = (box.y + box.h / 2.0) / img_h
+> w  = box.w / img_w                       # size, also as a fraction of the image
+> h  = box.h / img_h
+> return np.array([1.0, cx, cy, w, h])     # 1.0 = "a paddle is present here"
+> ```
 
 ---
 
@@ -152,6 +183,19 @@ It finds the export on its own (through `labels.py`, which knows the `pingpong-e
 layout) and caches both splits. Add `--force` to rebuild an existing cache, or
 `--splits training testing` to pick specific splits.
 
+> **What this does:** reads every JPEG once, resizes to 320×320, and saves the whole set
+> as one big `.npy` array (plus the target boxes as a second array).
+> **Why it matters:** training shows the model every image ~20 times (once per epoch).
+> Decoding JPEGs 20× is minutes of wasted work; decoding once into a memory-mapped array
+> makes every later epoch nearly free. This is the single biggest speedup in Phase A.
+> **In the code:** `training/preprocess.py:build_cache()`
+> ```python
+> images  = np.zeros((n, IMG_SIZE, IMG_SIZE, 3), dtype=np.uint8)
+> targets = np.zeros((n, TARGET_DIM), dtype=np.float32)   # all-0 row = background
+> # ... for each sample: cv2.imread -> resize -> images[i] = resized
+> #     and box_to_target(box) -> targets[i]   (the conversion from Step 1)
+> ```
+
 ### 3.2 Train
 
 ```bash
@@ -168,6 +212,20 @@ Key design choices, all in `train.py` with comments explaining why:
   majority class.
 - Prints `val_IoU` every epoch and saves the best model + `metrics.json` under
   `training/checkpoints/`.
+
+> **What this does:** defines the tiny "brain" and what it outputs for one image.
+> **Why it matters:** this is a network built **from scratch** — no pre-training. It has
+> two heads: one says *is a paddle here?* and one says *where?* Its whole output is just
+> **5 numbers**. Compare that to YOLO in Phase B, which starts from a model that already
+> saw millions of images — the contrast is the lesson of the project.
+> **In the code:** `training/model.py:PaddleDetNet.forward()`
+> ```python
+> obj = self.obj_head(...)      # (B, 1)  "paddle present?"  (raw logit)
+> box = torch.sigmoid(...)      # (B, 4)  cx, cy, w, h  in [0,1]
+> return torch.cat([obj, box], dim=1)   # (B, 5) = [present, cx, cy, w, h]
+> ```
+> `val_IoU` (in `train.py:boxes_iou()`) measures how well those 4 box numbers overlap the
+> true box — 0 = miss, 1 = perfect. `pick_device()` puts all this on the Mac's MPS/Metal GPU.
 
 ### 3.3 Read the result
 
@@ -190,11 +248,24 @@ training/.venv/bin/python training/export_onnx.py \
 
 ### 3.5 Watch it fail (the valuable part)
 
+Now *see* the weakness with your own eyes. The same web server you'll use in Step 5 also
+serves the Phase A model — just pass `--model cnn`:
+
+```bash
+# Phase A's own venv already has everything the server needs (opencv, onnxruntime).
+training/.venv/bin/python web/server.py --model cnn
+# open http://localhost:8080 , pick your camera, hit "start"
+```
+
 Point a webcam at yourself, lean in close in a dim room. It won't find the paddle.
 Diagnose it like we did: crop your face out of the frame → it suddenly works; brighten
 the frame → the score rises. **Conclusion: the tiny model memorized its training domain
 (distant, well-lit, full-body scenes) and can't generalize to a big close-up face in low
 light.** That's the motivation for Phase B.
+
+> ⚠️ **Always press "stop" in the browser before closing the tab** (same as Step 5). If
+> you don't, the camera stays locked open. There's a guard that releases it anyway, but
+> stopping cleanly is the habit.
 
 ---
 
@@ -228,6 +299,15 @@ yolo/.venv/bin/python yolo/prep_yolo.py --check
 The Edge Impulse `training/`→YOLO `train`, `testing/`→YOLO `val` split is preserved (no
 leakage: they were distinct splits to begin with). Background images get an **empty**
 `.txt` — YOLO uses those as negatives.
+
+> **What this does:** rewrites the same boxes into the layout YOLO's trainer expects.
+> **Why it matters:** it's the *same math as Step 1* (`cx=(x+w/2)/W`, normalized) — YOLO
+> just wants it in a per-image text file instead of a `.npy` array. One line per paddle:
+> ```
+> 0 0.512 0.478 0.230 0.310      # class cx cy w h — all 0..1, center-based
+> ```
+> A background image (no paddle) becomes an **empty** `foo.txt`. That's not a bug — an
+> empty file is how YOLO is told "nothing here, learn from it too."
 
 ### 4.3 Fine-tune
 
@@ -291,6 +371,10 @@ result to your browser as **MJPEG** (a sequence of JPEGs the browser flips throu
 video). It exposes a small API: list cameras, probe supported resolutions, start, stop,
 stream.
 
+One server, three engines: `--model cnn` (Phase A), `--model yolo` (Phase B, below), and
+`--model npu` (Step 8) all run through *this same file*. You already used `--model cnn`
+back in Step 3.5.
+
 ```bash
 # 'yolo' selects web/infer_yolo.py; 'cnn' would select the Phase A model
 yolo/.venv/bin/python web/server.py --model yolo
@@ -301,6 +385,23 @@ The key architectural trick: **every engine exposes the same `PaddleDetector` in
 (`.detect()` and `.draw()`). So `infer.py` (CNN), `infer_yolo.py` (YOLO/CPU), and
 `infer_npu.py` (YOLO/NPU) are interchangeable — the MJPEG loop in `server.py` never
 changes. This one decision makes Steps 6–8 painless.
+
+> **What this does:** the per-frame heartbeat of the whole live demo.
+> **Why it matters:** notice there's **nothing model-specific** in this loop. Swapping CNN
+> → YOLO → NPU only swaps what `detect()` points at; these exact ~8 lines are what run on
+> the board in Steps 6 and 8, unchanged. Write the loop once, reuse it everywhere.
+> **In the code:** `web/server.py:_stream()`
+> ```python
+> while self.state.running:
+>     frame = self.state.read()                    # grab a webcam frame
+>     det = self.detector.detect(frame)            # <- the only line that differs per engine
+>     self.detector.draw(frame, det)               # green box if a paddle was found
+>     ok, jpg = cv2.imencode(".jpg", frame, ...)   # encode and push to the browser
+>     self.wfile.write(b"--frame\r\n" ... jpg.tobytes())
+> ```
+> Inside YOLO's `detect()` (`web/infer_yolo.py`) the graph outputs 8400 candidate boxes;
+> plain-numpy `_nms()` throws away the overlapping duplicates and keeps the best — the
+> postprocessing lives in code, not in the model (this is what keeps the NPU port clean).
 
 > ⚠️ **Always press "stop" in the browser before closing.** If you don't, the camera
 > device stays locked open and won't reopen. (We added a guard so `/api/cameras` reports
@@ -513,6 +614,18 @@ sends `"r\n"` on the command FIFO; the daemon runs and replies `"1"` on the resp
 Python reads the raw `uint16` result from `/tmp/npu_out/.../output0.raw` and dequantizes it.
 `web/infer_npu.py` implements the Python side behind the *same* `PaddleDetector` interface,
 so `server.py` runs the NPU with `--model npu` and the MJPEG loop is unchanged.
+
+> **What this does:** loads the NPU model **once** and answers one inference per command,
+> forever — instead of relaunching the runtime (~250 ms) every single frame.
+> **Why it matters:** an accelerator only helps if the *road to it* is fast. The daemon
+> has two per-frame paths: `'g'` (the naive one) lets the SDK convert the frame
+> float↔uint16 one number at a time on the CPU; `'r'` (the fast one) hands the chip its
+> **native `uint16` bytes** with a single `memcpy` and does the conversion in vectorized
+> numpy on the Python side. Same result, but `'r'` is what makes the NPU actually win —
+> that's the whole story of Step 9.
+> **In the code:** `npu/daemon/QnnSampleApp.cpp:runDaemon()` (the `'r'` branch) +
+> `web/infer_npu.py` (quantize in numpy, read `scale`/`offset` from the daemon's `QUANT`
+> banner so the rounding matches bit-for-bit).
 
 **Cross-compiling the daemon** (on the x86 box, targeting aarch64 — see
 `npu/build_daemon.sh` for the exact, working recipe). The daemon is Qualcomm's SampleApp
