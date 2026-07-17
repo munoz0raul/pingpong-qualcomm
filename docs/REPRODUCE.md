@@ -154,8 +154,14 @@ Phase A stays reproducible even after you install the heavier YOLO stack.
 ```bash
 # Phase A environment
 python3 -m venv training/.venv
-training/.venv/bin/pip install -r training/requirements.txt
+training/.venv/bin/python -m pip install -r training/requirements.txt
 ```
+
+> **Why `python -m pip` and not `pip`?** On some Macs (notably the Python that ships with
+> Xcode Command Line Tools) `venv` creates the environment but *not* a `bin/pip` shortcut,
+> so `training/.venv/bin/pip` gives "No such file or directory". Calling pip as a module —
+> `.../bin/python -m pip` — always works, on every Python. Same command everywhere else in
+> this guide: prefer `bin/python -m pip` over `bin/pip`.
 
 ---
 
@@ -280,8 +286,11 @@ for free.
 
 ```bash
 python3 -m venv yolo/.venv
-yolo/.venv/bin/pip install -r yolo/requirements.txt   # ultralytics + onnx + onnxruntime
+yolo/.venv/bin/python -m pip install -r yolo/requirements.txt   # ultralytics + onnx + onnxruntime
 ```
+
+(If `yolo/.venv/bin/pip` reports "No such file or directory", that's the Xcode-Python quirk
+from Step 2 — the `python -m pip` form above sidesteps it.)
 
 ### 4.2 Convert labels to YOLO format
 
