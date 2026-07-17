@@ -342,6 +342,24 @@ yolo/.venv/bin/python yolo/train_yolo.py --epochs 80 --device mps
 The score here is **mAP@0.5** (the standard detection metric). Phase B reaches
 **mAP@0.5 ≈ 0.98** — versus IoU 0.56 for the from-scratch CNN.
 
+> **What this does:** takes YOLOv8n's COCO-pretrained weights and nudges them to recognize
+> *your* paddle — this is **transfer learning**, the heart of Phase B.
+> **Why it matters:** Phase A started from random weights and only ever saw ~300 paddle
+> photos, so it memorized them. YOLO starts from a model that already saw millions of
+> images (people, faces, objects at every scale and light), so fine-tuning only has to
+> teach one new word — "paddle" — and inherits all that robustness for free. That's the
+> whole reason it works in the dim-room-close-up-face scene that blinded the CNN.
+> **In the code:** `yolo/train_yolo.py:main()`
+> ```python
+> from ultralytics import YOLO
+> model = YOLO("yolov8n.pt")          # download COCO-pretrained weights (once)
+> model.train(data=DATA_YAML, epochs=80, imgsz=320, device="mps",
+>             name="paddle", plots=True)   # -> runs/paddle/weights/best.pt
+> ```
+> `imgsz=320` matches Phase A and the board; `device="mps"` uses the Mac's Metal GPU.
+> Ultralytics auto-applies mosaic + brightness/flip augmentation — attacking exactly the
+> light/framing weakness that killed Phase A.
+
 ![YOLOv8n training curves](img/yolo_training_curves.png)
 *Loss falling and mAP climbing over 80 epochs — the model learning "paddle."*
 
@@ -360,12 +378,47 @@ NMS uses operations not every NPU backend supports. We do decode + NMS in plain 
 lives in code.* This is what makes the NPU port clean later. Shape is fixed at
 1×3×320×320 (the NPU requires fixed shapes).
 
+> **What this does:** converts the trained `best.pt` into a portable `best.onnx` the board
+> can run without PyTorch installed.
+> **Why it matters:** the two flags here are deliberate and pay off later. `nms=False`
+> leaves the final "remove duplicate boxes" step *out* of the model — because that op isn't
+> supported on every NPU — and we do it in numpy instead (see Step 5). `dynamic=False` locks
+> the input to a fixed 1×3×320×320, which the NPU requires. Decisions made *now* are what let
+> Steps 7–8 just work.
+> **In the code:** `yolo/export_yolo.py:main()`
+> ```python
+> model = YOLO(args.ckpt)             # runs/paddle/weights/best.pt
+> model.export(format="onnx", imgsz=320, opset=17,
+>              nms=False,             # decode + NMS live in numpy, not the graph
+>              dynamic=False,         # fixed 1x3x320x320 — the NPU needs a fixed shape
+>              simplify=True)
+> ```
+
 ### 4.5 Prove the generalization
 
-Grab the exact frame that killed Phase A (big face, paddle close, dim room — mine is
-`emeet2.jpg`) and run YOLO on it. It finds the paddle (box ≈ (224,177)-(383,363),
-confidence ≈ 0.75). Thesis proven: the pre-trained model generalizes where the
-from-scratch one couldn't.
+Grab a hard frame — the kind that killed Phase A: a big face close to the camera, the
+paddle nearby, a dim room. Save it as a `.jpg` (mine was `emeet2.jpg`; that exact file
+isn't shipped in the repo, so use one you captured yourself). `infer_yolo.py` runs
+standalone as a one-image smoke test — the same detector the live server uses, just
+pointed at a file:
+
+```bash
+yolo/.venv/bin/python web/infer_yolo.py --image /path/to/your_hard_frame.jpg
+# prints the box + confidence, and writes an annotated /tmp/yolo_infer_test.jpg
+```
+
+On my frame it found the paddle (box ≈ (224,177)-(383,363), confidence ≈ 0.75) — the exact
+scene where the CNN scored ~0.00. Thesis proven: the pre-trained model generalizes where
+the from-scratch one couldn't. (No hard frame handy? Skip straight to Step 5 and lean into
+the camera in a dim room — you'll see the same contrast live.)
+
+> **What this does:** runs the exported `.onnx` on one still image.
+> **Why it matters:** this is the payoff of the whole phase, on a single frame. Same hard
+> scene, same 320×320 input — the CNN went blind here, YOLO boxes the paddle confidently.
+> It also proves your `.onnx` + numpy decode work *before* you move to live video.
+> **In the code:** `web/infer_yolo.py` (the `__main__` smoke test) → `PaddleDetector.detect()`
+> — the graph emits 8400 candidate boxes, `_nms()` keeps the best; identical to what runs
+> per-frame in the browser next.
 
 ![YOLO finds the paddle in the hard frame](img/yolo_emeet2.jpg)
 *The close-up-face, dim-room frame that blinded the from-scratch CNN — YOLOv8n boxes the paddle confidently.*
