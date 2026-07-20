@@ -854,10 +854,77 @@ same math. (Measured via `qnn-net-run --profiling`.)
 
 Here's the problem for live video: spinning up `qnn-net-run` fresh each frame costs
 ~250 ms just to load the context — hopeless. The fix is a **resident daemon**: a C++
-program that loads the NPU context **once**, stays alive, and runs **one inference per
-command**.
+program (Qualcomm's SDK `SampleApp` plus our `runDaemon()` method) that loads the NPU
+context **once**, stays alive, and runs **one inference per command**. `web/infer_npu.py`
+drives it behind the *same* `PaddleDetector` interface as Phases A/B, so `server.py --model
+npu` reuses the unchanged MJPEG loop.
 
-We built it by adapting Qualcomm's SDK `SampleApp`. The sources are in `npu/daemon/`:
+Three steps: build the daemon, get it onto the board, run the server.
+
+**1. Build the daemon** (on the x86 box — cross-compiled for aarch64). This repo ships the
+**modified** daemon sources (`npu/daemon/`), not the full SampleApp tree, so you first
+overlay them onto a copy of the SDK's SampleApp; `build_daemon.sh` then compiles it:
+
+```bash
+# on the x86 box
+bash "$QW"/pingpong-qualcomm/npu/build_daemon.sh   # -> $QW/daemon/qnn-daemon-aarch64
+```
+
+<details>
+<summary>Setting up the daemon source tree before the first build (one-time)</summary>
+
+`build_daemon.sh` compiles `$WORK/daemon/src/...` — you populate that once by overlaying
+our three modified files onto Qualcomm's SampleApp:
+
+1. Copy the QAIRT SDK's SampleApp source tree to `$QW/daemon/` (so `$QW/daemon/src/` has
+   the stock `main.cpp`, `QnnSampleApp.cpp/.hpp`, and the `Log/ PAL/ Utils/ WrapperUtils/`
+   support dirs).
+2. Overlay the modified files from this repo (they add `runDaemon()` and the `--daemon`
+   flags — this is the only real change):
+   - `npu/daemon/main.cpp` -> `$QW/daemon/src/main.cpp`
+   - `npu/daemon/QnnSampleApp.cpp` -> `$QW/daemon/src/QnnSampleApp.cpp`
+   - `npu/daemon/QnnSampleApp.hpp` -> `$QW/daemon/src/QnnSampleApp.hpp`
+3. Run `build_daemon.sh` (above). It sets `$SRCS`/`$INCLUDES` from `$SDK` + `$R` and calls
+   the cross-compiler — no hand-editing. The bare `g++` line it runs, for reference:
+
+```bash
+aarch64-linux-gnu-g++-13 -std=c++17 --sysroot="$R" -B "$GCCDIR" \
+  -fPIC -Wno-write-strings -fno-exceptions -fno-rtti -DQNN_API= \
+  $INCLUDES $SRCS -o qnn-daemon-aarch64 -ldl -static-libstdc++ -static-libgcc
+```
+</details>
+
+**2. Get the daemon onto the board** — same x86 → Mac → board hop as 8.1, reusing
+`npu-stage/`:
+
+```bash
+# on the Mac — pull the freshly built daemon down, then push it to the board
+# (build_daemon.sh writes it to $WORK/daemon/, i.e. $QW/daemon/ on the x86 box)
+rsync -av user@x86-linux:/local/mnt/workspace/qairt-work/daemon/qnn-daemon-aarch64 npu-stage/
+scp npu-stage/qnn-daemon-aarch64 root@$BOARD_IP:/home/weston/npu/
+```
+
+The daemon needs the `.bin` + `.so` libs already in `/home/weston/npu/` from 8.1, and the
+`web/` code already in `/opt/pingpong/web/` from Step 5 — nothing else to copy.
+
+**3. Run the live server on the NPU** (on the board):
+
+```bash
+# on the board — cd to where the web/ code lives (from Step 5); setsid detaches it from the
+# SSH session (a plain '&' dies on logout)
+cd /opt/pingpong
+setsid python3 web/server.py --model npu --cameras 26 --backend v4l2 --port 8080 \
+  > /tmp/srv_npu.log 2>&1 < /dev/null &
+# open http://192.168.15.86:8080 — paddle detection drawn live by the NPU
+```
+
+`infer_npu.py` starts the daemon as a subprocess, waits for it to print `DAEMON_READY`,
+keeps the command FIFO open for the whole session, and cleanly sends `"q"` on shutdown.
+
+<details>
+<summary>How the daemon works (the protocol, and the two per-frame paths)</summary>
+
+The sources are in `npu/daemon/`:
 - `QnnSampleApp.cpp` — the added **`runDaemon()`** method: set up the tensors once, then
   loop reading a command FIFO. Two per-frame paths: on `"g"` (legacy) it re-reads the input
   file and lets the SDK convert float↔uint16 element-by-element; on `"r"` (the fast in-memory
@@ -871,8 +938,6 @@ We built it by adapting Qualcomm's SDK `SampleApp`. The sources are in `npu/daem
 Python quantizes the frame in numpy, writes the native `uint16` bytes to `/tmp/npu_in.raw`,
 sends `"r\n"` on the command FIFO; the daemon runs and replies `"1"` on the response FIFO;
 Python reads the raw `uint16` result from `/tmp/npu_out/.../output0.raw` and dequantizes it.
-`web/infer_npu.py` implements the Python side behind the *same* `PaddleDetector` interface,
-so `server.py` runs the NPU with `--model npu` and the MJPEG loop is unchanged.
 
 > **What this does:** loads the NPU model **once** and answers one inference per command,
 > forever — instead of relaunching the runtime (~250 ms) every single frame.
@@ -885,60 +950,8 @@ so `server.py` runs the NPU with `--model npu` and the MJPEG loop is unchanged.
 > **In the code:** `npu/daemon/QnnSampleApp.cpp:runDaemon()` (the `'r'` branch) +
 > `web/infer_npu.py` (quantize in numpy, read `scale`/`offset` from the daemon's `QUANT`
 > banner so the rounding matches bit-for-bit).
+</details>
 
-**Cross-compiling the daemon** (on the x86 box, targeting aarch64 — see
-`npu/build_daemon.sh` for the exact, working recipe). The daemon is Qualcomm's SampleApp
-sources plus our `runDaemon()`; you compile them against the SDK headers with an aarch64
-cross-compiler.
-
-Important: this repo contains the **modified daemon files**, not the full Qualcomm
-SampleApp source tree. To rebuild the daemon from scratch:
-
-1. Locate/copy the QAIRT SDK SampleApp source tree on the x86 machine.
-2. Overlay the files from this repo:
-   - `npu/daemon/main.cpp` -> `src/main.cpp`
-   - `npu/daemon/QnnSampleApp.cpp` -> `src/QnnSampleApp.cpp`
-   - `npu/daemon/QnnSampleApp.hpp` -> `src/QnnSampleApp.hpp`
-3. Keep the SampleApp support directories (`Log/`, `PAL/`, `Utils/`, `WrapperUtils/`).
-4. Then compile with the command below or adapt `npu/build_daemon.sh`.
-
-The variables below (spelled out in full in `build_daemon.sh`):
-
-- `$R` — the sysroot of your aarch64 cross toolchain (where `aarch64-linux-gnu-g++-13` and
-  its libs live).
-- `$INCLUDES` — `-Isrc ... -I$SDK/include/QNN` (the SampleApp source tree + the SDK's QNN
-  headers).
-- `$SRCS` — `src/main.cpp src/QnnSampleApp.cpp` plus the SampleApp support dirs
-  (`Log/`, `PAL/`, `Utils/`, `WrapperUtils/`).
-
-```bash
-aarch64-linux-gnu-g++-13 -std=c++17 --sysroot="$R" \
-  -fPIC -Wno-write-strings -fno-exceptions -fno-rtti -DQNN_API= \
-  $INCLUDES $SRCS -o qnn-daemon-aarch64 \
-  -ldl -static-libstdc++ -static-libgcc
-```
-
-Copy `qnn-daemon-aarch64` to `/home/weston/npu/` on the board, alongside the `.bin` and
-`.so` files from 8.1 — same x86 → Mac → board hop:
-
-```bash
-# on the Mac — pull the freshly built daemon down, then push it to the board
-# (build_daemon.sh writes it to $WORK/daemon/, i.e. $QW/daemon/ on the x86 box)
-rsync -av user@x86-linux:/local/mnt/workspace/qairt-work/daemon/qnn-daemon-aarch64 npu-stage/
-scp npu-stage/qnn-daemon-aarch64 root@$BOARD_IP:/home/weston/npu/
-```
-
-Then run the live server on the NPU:
-
-```bash
-# on the board — setsid detaches it from the SSH session (a plain '&' dies on logout)
-setsid python3 web/server.py --model npu --cameras 26 --backend v4l2 --port 8080 \
-  > /tmp/srv_npu.log 2>&1 < /dev/null &
-# open http://192.168.15.86:8080 — paddle detection drawn live by the NPU
-```
-
-`infer_npu.py` starts the daemon as a subprocess, waits for it to print `DAEMON_READY`,
-keeps the command FIFO open for the whole session, and cleanly sends `"q"` on shutdown.
 
 ---
 
