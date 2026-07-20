@@ -2,12 +2,35 @@
 # Recompile the SampleApp WITH runDaemon() + --daemon flags (Phase D).
 # Same cross-aarch64 recipe validated in build_base.sh, in-place under daemon/.
 set +e
-source "$(dirname "$0")/env.sh" || exit 1
+HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/env.sh" || exit 1
 export LD_LIBRARY_PATH="$R/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
 GXX="$R/usr/bin/aarch64-linux-gnu-g++-13"
 GCCDIR="$R/usr/lib/gcc-cross/aarch64-linux-gnu/13"
 
 BUILD="$WORK/daemon"
+
+# --- one-time setup: lay down the SampleApp source tree, then overlay our modified files ---
+# The repo ships only the 3 modified sources (npu/daemon/); the rest of the SampleApp tree
+# (Log/ PAL/ Utils/ WrapperUtils/ + the stock .cpp) comes from the SDK. If src/ isn't there
+# yet, copy it from the SDK — no manual step, no ordering trap.
+if [ ! -d "$BUILD/src" ]; then
+  SAMPLE="$SDK/examples/QNN/SampleApp/SampleApp"
+  if [ ! -d "$SAMPLE" ]; then
+    echo "ERROR: SampleApp not found at $SAMPLE" >&2
+    echo "       Check your SDK layout, or copy the SampleApp tree to $BUILD/ by hand." >&2
+    exit 1
+  fi
+  echo "===== first build: copying SampleApp from the SDK into $BUILD ====="
+  mkdir -p "$BUILD"
+  cp -r "$SAMPLE/"* "$BUILD/" || exit 1
+fi
+# Always overlay our modified files (keeps them in sync if the repo copy changed).
+echo "===== overlaying modified daemon sources (runDaemon + --daemon flags) ====="
+cp "$HERE/daemon/main.cpp"          "$BUILD/src/main.cpp"          || exit 1
+cp "$HERE/daemon/QnnSampleApp.cpp"  "$BUILD/src/QnnSampleApp.cpp"  || exit 1
+cp "$HERE/daemon/QnnSampleApp.hpp"  "$BUILD/src/QnnSampleApp.hpp"  || exit 1
+
 cd "$BUILD" || exit 1
 
 SRCS="src/main.cpp src/QnnSampleApp.cpp \

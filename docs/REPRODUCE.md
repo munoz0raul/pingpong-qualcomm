@@ -862,8 +862,9 @@ npu` reuses the unchanged MJPEG loop.
 Three steps: build the daemon, get it onto the board, run the server.
 
 **1. Build the daemon** (on the x86 box — cross-compiled for aarch64). This repo ships the
-**modified** daemon sources (`npu/daemon/`), not the full SampleApp tree, so you first
-overlay them onto a copy of the SDK's SampleApp; `build_daemon.sh` then compiles it:
+**modified** daemon sources (`npu/daemon/`), not the full SampleApp tree — but the script
+handles that: on the first run it copies the SampleApp from your `$SDK`, overlays our three
+files, and compiles. One line:
 
 ```bash
 # on the x86 box
@@ -871,27 +872,31 @@ bash "$QW"/pingpong-qualcomm/npu/build_daemon.sh   # -> $QW/daemon/qnn-daemon-aa
 ```
 
 <details>
-<summary>Setting up the daemon source tree before the first build (one-time)</summary>
+<summary>What the first build does under the hood</summary>
 
-`build_daemon.sh` compiles `$WORK/daemon/src/...` — you populate that once by overlaying
-our three modified files onto Qualcomm's SampleApp:
+The daemon is Qualcomm's SampleApp plus three modified files (they add `runDaemon()` and the
+`--daemon` flags — the only real change). The repo ships just those three; the rest of the
+tree comes from the SDK. `build_daemon.sh` assembles it automatically:
 
-1. Copy the QAIRT SDK's SampleApp source tree to `$QW/daemon/` (so `$QW/daemon/src/` has
-   the stock `main.cpp`, `QnnSampleApp.cpp/.hpp`, and the `Log/ PAL/ Utils/ WrapperUtils/`
-   support dirs).
-2. Overlay the modified files from this repo (they add `runDaemon()` and the `--daemon`
-   flags — this is the only real change):
+1. If `$QW/daemon/src/` doesn't exist yet, it copies the SampleApp tree from
+   `$SDK/examples/QNN/SampleApp/SampleApp/` (bringing the stock `main.cpp`,
+   `QnnSampleApp.cpp/.hpp` and the `Log/ PAL/ Utils/ WrapperUtils/` support dirs).
+2. It overlays our modified files from `npu/daemon/` onto `$QW/daemon/src/` (every run, so
+   they stay in sync):
    - `npu/daemon/main.cpp` -> `$QW/daemon/src/main.cpp`
    - `npu/daemon/QnnSampleApp.cpp` -> `$QW/daemon/src/QnnSampleApp.cpp`
    - `npu/daemon/QnnSampleApp.hpp` -> `$QW/daemon/src/QnnSampleApp.hpp`
-3. Run `build_daemon.sh` (above). It sets `$SRCS`/`$INCLUDES` from `$SDK` + `$R` and calls
-   the cross-compiler — no hand-editing. The bare `g++` line it runs, for reference:
+3. It sets `$SRCS`/`$INCLUDES` from `$SDK` + `$R` and cross-compiles. The bare `g++` line it
+   runs, for reference:
 
 ```bash
 aarch64-linux-gnu-g++-13 -std=c++17 --sysroot="$R" -B "$GCCDIR" \
   -fPIC -Wno-write-strings -fno-exceptions -fno-rtti -DQNN_API= \
   $INCLUDES $SRCS -o qnn-daemon-aarch64 -ldl -static-libstdc++ -static-libgcc
 ```
+
+(If your SDK puts SampleApp somewhere else, the script says so — copy that tree to
+`$QW/daemon/` yourself and re-run.)
 </details>
 
 **2. Get the daemon onto the board** — same x86 → Mac → board hop as 8.1, reusing
