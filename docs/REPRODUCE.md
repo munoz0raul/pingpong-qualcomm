@@ -788,15 +788,31 @@ qnn-context-binary-generator \
 The board needs `best_a16w8_htpv75.bin` plus a handful of Qualcomm runtime `.so` libraries
 (the board has no SDK — just these). `npu/copy_runtime_libs.sh` gathers the right ones from
 your `$SDK`. Point its output at `$QW` so everything the board needs ends up in one place
-next to the `.bin`, then `scp` from there:
+next to the `.bin`:
 
 ```bash
-# on the x86 box — the script is in the repo, but stage the libs into $QW (next to the .bin)
+# on the x86 box — stage the libs into $QW (next to the .bin, ready to pull)
 bash "$QW"/pingpong-qualcomm/npu/copy_runtime_libs.sh "$QW"/runtime_libs
+```
 
-# then copy the libs + the .bin to the board (run from $QW, where both now live)
-cd "$QW"
-scp runtime_libs/*.so ctx16/best_a16w8_htpv75.bin root@<board-ip>:/home/weston/npu/
+**Then get those files onto the board — via the Mac.** If, like me, your QAIRT box is a
+remote/cloud x86 machine, it usually **can't reach the board** (the board is on your local
+network). The Mac reaches both, so hop through it: pull from the x86 box to a staging folder
+on the Mac, then push to the board.
+
+```bash
+# on the Mac — pull the .bin + runtime libs down from the x86 box into a staging folder.
+# Replace user@x86-linux and /local/mnt/workspace/qairt-work with your box and your $QW
+# ($QW is a shell var on the x86 box — it doesn't exist here, so write the path out).
+mkdir -p npu-stage
+rsync -av user@x86-linux:/local/mnt/workspace/qairt-work/runtime_libs/ \
+          user@x86-linux:/local/mnt/workspace/qairt-work/ctx16/best_a16w8_htpv75.bin \
+          npu-stage/
+
+# on the Mac — make the target dir on the board FIRST, then push (scp of many files needs it)
+BOARD_IP=192.168.15.86
+ssh root@$BOARD_IP 'mkdir -p /home/weston/npu'
+scp npu-stage/*.so npu-stage/best_a16w8_htpv75.bin root@$BOARD_IP:/home/weston/npu/
 ```
 
 ---
@@ -888,8 +904,17 @@ aarch64-linux-gnu-g++-13 -std=c++17 --sysroot="$R" \
   -ldl -static-libstdc++ -static-libgcc
 ```
 
-Copy `qnn-daemon-aarch64` to `/home/weston/npu/` on the board alongside the `.bin` and
-`.so` files. Then run the live server on the NPU:
+Copy `qnn-daemon-aarch64` to `/home/weston/npu/` on the board, alongside the `.bin` and
+`.so` files from 8.1 — same x86 → Mac → board hop:
+
+```bash
+# on the Mac — pull the freshly built daemon down, then push it to the board
+# (build_daemon.sh writes it to $WORK/daemon/, i.e. $QW/daemon/ on the x86 box)
+rsync -av user@x86-linux:/local/mnt/workspace/qairt-work/daemon/qnn-daemon-aarch64 npu-stage/
+scp npu-stage/qnn-daemon-aarch64 root@$BOARD_IP:/home/weston/npu/
+```
+
+Then run the live server on the NPU:
 
 ```bash
 # on the board — setsid detaches it from the SSH session (a plain '&' dies on logout)
