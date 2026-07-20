@@ -787,11 +787,15 @@ qnn-context-binary-generator \
 
 The board needs `best_a16w8_htpv75.bin` plus a handful of Qualcomm runtime `.so` libraries
 (the board has no SDK — just these). `npu/copy_runtime_libs.sh` gathers the right ones from
-your `$SDK` into a local `runtime_libs/` folder:
+your `$SDK`. Point its output at `$QW` so everything the board needs ends up in one place
+next to the `.bin`, then `scp` from there:
 
 ```bash
-bash npu/copy_runtime_libs.sh          # -> runtime_libs/ (libQnnHtp.so, ...V75Skel.so, etc.)
-# then copy them + the .bin to the board:
+# on the x86 box — the script is in the repo, but stage the libs into $QW (next to the .bin)
+bash "$QW"/pingpong-qualcomm/npu/copy_runtime_libs.sh "$QW"/runtime_libs
+
+# then copy the libs + the .bin to the board (run from $QW, where both now live)
+cd "$QW"
 scp runtime_libs/*.so ctx16/best_a16w8_htpv75.bin root@<board-ip>:/home/weston/npu/
 ```
 
