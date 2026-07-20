@@ -522,16 +522,27 @@ You'll get ~24 FPS end-to-end on the CPU. That's your **CPU baseline**.
 This all happens on the **x86-64 Linux machine** with the QAIRT SDK installed. The scripts
 are in `npu/`. Copy `yolo/best.onnx` and your calibration data to that machine first.
 
-> ⚠️ **Honesty note for Steps 7–8.** Unlike Phases A/B, these are *not* pure copy-paste.
-> The `npu/*.sh` scripts contain **absolute paths from my machine** (e.g.
-> `/local/mnt/workspace/qairt/...`) and assume the QAIRT SDK is installed and on your
-> `PATH`. Treat them as a **worked reference**, not a turnkey script: read each one, then
-> set `SDK=<your QAIRT install>` and adjust the paths to your box. The commands below show
-> the essential call for each stage; the scripts wrap them with those machine-specific
-> paths. You also need Qualcomm's runtime libraries — from the SDK, the ones that end up on
-> the board are `libQnnHtp.so`, `libQnnSystem.so`, `libQnnHtpNetRunExtensions.so`, and the
-> matching HTP **V75** skel/stub libs (`libQnnHtpV75*.so`), all from
-> `<SDK>/lib/aarch64-*/` and `<SDK>/lib/hexagon-v75/`.
+> ⚠️ **What's different about Steps 7–8.** Unlike Phases A/B, these need extras the tutorial
+> can't ship for you: the (free) **QAIRT SDK**, an **x86-64 Linux box** to run it, and — to
+> rebuild the live daemon — an aarch64 cross-compiler. But you no longer hand-edit each
+> script. All the machine-specific paths now live in **one file, `npu/env.sh`**; every
+> `npu/*.sh` script sources it. **Edit `env.sh` once** (set `SDK`, and `R` if you rebuild the
+> daemon), then run the scripts as-is. Two honest caveats remain: the SDK is a separate
+> download, and rebuilding the C++ daemon needs the SDK's SampleApp source tree overlaid
+> (spelled out in [Step 8.2](#step-8)).
+
+**Set up once — edit `npu/env.sh`:**
+
+```bash
+# npu/env.sh — set these to match your machine, then leave it alone.
+: "${SDK:=/path/to/qairt/2.47.0.260601}"   # <-- your QAIRT SDK install
+: "${R:=/path/to/cross/root}"              # <-- aarch64 sysroot (only for the daemon build)
+: "${WORK:=$PWD}"                          # x86 work dir — best.onnx, DLCs, calib/, ctx live here
+```
+
+Put `best.onnx` and your `calib/` folder in `WORK` (defaults to wherever you run the script
+from). Every command below is what the scripts run; the scripts just wrap it with `$SDK` /
+`$WORK` from `env.sh`.
 
 The NPU can't run the float ONNX directly. Three transformations:
 
@@ -631,8 +642,15 @@ qnn-context-binary-generator \
 # -> ctx16/best_a16w8_htpv75.bin
 ```
 
-Copy `best_a16w8_htpv75.bin` and the runtime `.so` libraries from the SDK to the board
-under `/home/weston/npu/`.
+The board needs `best_a16w8_htpv75.bin` plus a handful of Qualcomm runtime `.so` libraries
+(the board has no SDK — just these). `npu/copy_runtime_libs.sh` gathers the right ones from
+your `$SDK` into a local `runtime_libs/` folder:
+
+```bash
+bash npu/copy_runtime_libs.sh          # -> runtime_libs/ (libQnnHtp.so, ...V75Skel.so, etc.)
+# then copy them + the .bin to the board:
+scp runtime_libs/*.so ctx16/best_a16w8_htpv75.bin root@<board-ip>:/home/weston/npu/
+```
 
 ---
 
