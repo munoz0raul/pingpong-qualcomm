@@ -1,9 +1,12 @@
 #!/bin/bash
-# npu/copy_runtime_libs.sh — stage the Qualcomm runtime .so libraries the BOARD needs.
+# npu/copy_runtime_libs.sh — stage the Qualcomm runtime .so libraries from the SDK.
 #
-# The board has no QAIRT SDK; it just needs a handful of runtime libraries next to the
-# context .bin and the daemon binary. This gathers them from your SDK into ./runtime_libs/
-# so you can scp the whole folder to /home/weston/npu/ on the board in one shot.
+# NOTE: on the IQ-8275 EVK you almost certainly DON'T need this. The board already ships the
+# QNN runtime in /usr/lib (same 2.47 as the SDK), and those are the libs that actually load
+# there — the SDK's x86-staged copies link against libc.so (a dev symlink the board lacks)
+# and fail with "libc.so: cannot open shared object file". Keep this only for a board whose
+# image has no QNN runtime; then you'd copy these next to the .bin AND make them resolve
+# their own deps. For the EVK, skip it: copy just the context .bin over (see Step 7/8).
 set +e
 source "$(dirname "$0")/env.sh" || exit 1
 

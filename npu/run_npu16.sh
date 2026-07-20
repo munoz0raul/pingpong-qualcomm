@@ -1,7 +1,8 @@
 #!/bin/bash
 # Run the A16W8 YOLO (act 16-bit) on the HTP V75 NPU — version that preserves the score.
-# Runs ON THE BOARD (aarch64), which has no QAIRT SDK — just the runtime .so libs, the
-# context .bin, and qnn-net-run. NPU_DIR is where you copied those (default /home/weston/npu).
+# Runs ON THE BOARD (aarch64). The board already ships the QNN runtime in /usr/bin +
+# /usr/lib (same 2.47 as the SDK) — we do NOT copy any .so from the x86 box. NPU_DIR only
+# holds the context .bin + the test input (default /home/weston/npu).
 set +e
 NPU_DIR="${NPU_DIR:-/home/weston/npu}"
 cd "$NPU_DIR" || exit 1

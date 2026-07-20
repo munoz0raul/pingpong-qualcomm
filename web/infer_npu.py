@@ -43,11 +43,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from infer_yolo import _letterbox, _nms, Detection, IMG_SIZE
 
 # --- board defaults (IQ-8275 EVK) ---
-NPU_DIR = "/home/weston/npu"                         # where daemon + .bin + libs live
+NPU_DIR = "/home/weston/npu"                         # where the daemon binary + our .bin live
 DAEMON_BIN = "qnn-daemon-aarch64"
 CONTEXT_BIN = "best_a16w8_htpv75.bin"
-BACKEND = "libQnnHtp.so"
-SYSTEM_LIB = "libQnnSystem.so"
+# The board already ships the QNN runtime in /usr/lib (same 2.47 as the SDK). Use THOSE libs
+# (built for this board's libc), not copies from the x86 SDK — those link against libc.so
+# (a dev symlink absent on the board) and fail with "libc.so: cannot open shared object file".
+QNN_LIB_DIR = "/usr/lib"
+BACKEND = os.path.join(QNN_LIB_DIR, "libQnnHtp.so")
+SYSTEM_LIB = os.path.join(QNN_LIB_DIR, "libQnnSystem.so")
 
 CMD_FIFO = "/tmp/npu_cmd.fifo"
 RESP_FIFO = "/tmp/npu_resp.fifo"
@@ -96,7 +100,8 @@ class PaddleDetector:
 
     def _start_daemon(self, context_bin):
         env = dict(os.environ)
-        env["LD_LIBRARY_PATH"] = self.npu_dir + ":" + env.get("LD_LIBRARY_PATH", "")
+        # Resolve libQnnHtp.so's own deps (libc.so etc.) from the board's system libs.
+        env["LD_LIBRARY_PATH"] = QNN_LIB_DIR + ":" + self.npu_dir + ":" + env.get("LD_LIBRARY_PATH", "")
         cmd = [
             os.path.join(self.npu_dir, DAEMON_BIN),
             "--backend", BACKEND,

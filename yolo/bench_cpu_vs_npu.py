@@ -17,7 +17,8 @@ import cv2
 
 sys.path.insert(0, "/opt/pingpong/web")
 
-IMG = "/tmp/emeet2.jpg"
+# Test frame: pass the hard frame you used in Step 4.5 as argv[1]; defaults to /tmp/emeet2.jpg.
+IMG = sys.argv[1] if len(sys.argv) > 1 else "/tmp/emeet2.jpg"
 WARMUP = 5
 ITERS = 50
 
@@ -49,6 +50,8 @@ def main():
     frame = cv2.imread(IMG)
     if frame is None:
         print(f"ERROR: could not open {IMG}")
+        print("       Pass the hard frame you used in Step 4.5:")
+        print("       python3 yolo/bench_cpu_vs_npu.py /tmp/your_hard_frame.jpg")
         sys.exit(1)
     print(f"frame: {IMG}  shape={frame.shape}  |  warmup={WARMUP} iters={ITERS}")
 

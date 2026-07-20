@@ -531,9 +531,9 @@ machines and what runs where are called out at each sub-step below.
 > script. All the machine-specific paths live in **one file, `npu/env.sh`**, which every
 > `npu/*.sh` script sources. Better: if you `export QW=<work dir>` at the top of 7.0 (below),
 > `env.sh` derives everything from it and you **edit nothing** — the only exception is `R`
-> (the cross-compiler), needed just for the daemon in [Step 8.2](#step-8). Two honest caveats
-> remain: the SDK is a separate download, and rebuilding the C++ daemon needs the SDK's
-> SampleApp source tree overlaid (spelled out in Step 8.2).
+> (the cross-compiler), needed just for the daemon in [Step 8.2](#step-8). One honest caveat
+> remains: the SDK is a separate download. (The board itself needs nothing extra — its
+> `/usr/lib` already ships the QNN runtime; you only copy your compiled `.bin` over.)
 
 **7.0 — Install the QAIRT SDK** (on the x86 Linux box, once).
 
@@ -785,21 +785,21 @@ qnn-context-binary-generator \
 
 </details>
 
-The board needs `best_a16w8_htpv75.bin` plus a handful of Qualcomm runtime `.so` libraries
-(the board has no SDK — just these). `npu/copy_runtime_libs.sh` gathers the right ones from
-your `$SDK`. Point its output at `$QW` so everything the board needs ends up in one place
-next to the `.bin`:
+The board already ships the **QNN runtime** — `/usr/bin/qnn-net-run` and the
+`/usr/lib/libQnn*.so` libraries, the same 2.47 as the SDK — so you do **not** copy any `.so`
+from the x86 box. The only compiled artifact that travels is your model: `best_a16w8_htpv75.bin`.
 
-```bash
-# on the x86 box — stage the libs into $QW (next to the .bin, ready to pull)
-bash "$QW"/pingpong-qualcomm/npu/copy_runtime_libs.sh "$QW"/runtime_libs
-```
+> **Heads-up (why no libs get copied):** an earlier draft of this tutorial staged runtime
+> `.so` files from the SDK onto the board. That's both unnecessary *and* broken — the SDK's
+> x86-staged libs link against `libc.so` (a dev symlink the board doesn't have), so they fail
+> with `libc.so: cannot open shared object file`. The board's own `/usr/lib` libs are the
+> right ones. If you see a `copy_runtime_libs.sh` mentioned anywhere, you can ignore it.
 
-**Then get those files onto the board — via the Mac.** If, like me, your QAIRT box is a
+**Get the `.bin` onto the board — via the Mac.** If, like me, your QAIRT box is a
 remote/cloud x86 machine, it usually **can't reach the board** (the board is on your local
-network). The Mac reaches both, so hop through it: pull the compiled artifacts from the x86
-box, add the scripts + a test frame from your Mac clone, and push the whole bundle to the
-board. Everything the board runs in Step 8.1 lives **flat in one folder** (`/home/weston/npu`).
+network). The Mac reaches both, so hop through it: pull the `.bin` from the x86 box, add the
+scripts + a test frame from your Mac clone, and push the bundle to the board. Everything the
+board runs in Step 8.1 lives **flat in one folder** (`/home/weston/npu`).
 
 ```bash
 # on the Mac, from your pingpong-qualcomm clone. First generate the test-frame input
@@ -808,12 +808,11 @@ board. Everything the board runs in Step 8.1 lives **flat in one folder** (`/hom
 yolo/.venv/bin/python yolo/gen_test_input.py /path/to/your_hard_frame.jpg
 # -> yolo/emeet2_input.raw + yolo/emeet2_meta.txt
 
-# Pull the .bin + runtime libs down from the x86 box into a staging folder.
+# Pull just the .bin down from the x86 box into a staging folder.
 # Replace user@x86-linux and /local/mnt/workspace/qairt-work with your box and your $QW
 # ($QW is a shell var on the x86 box — it doesn't exist here, so write the path out).
 mkdir -p npu-stage
-rsync -av user@x86-linux:/local/mnt/workspace/qairt-work/runtime_libs/ \
-          user@x86-linux:/local/mnt/workspace/qairt-work/ctx16/best_a16w8_htpv75.bin \
+rsync -av user@x86-linux:/local/mnt/workspace/qairt-work/ctx16/best_a16w8_htpv75.bin \
           npu-stage/
 
 # Add the two scripts the board runs + the two test inputs it reads (all from this clone).
@@ -833,11 +832,12 @@ scp npu-stage/* root@$BOARD_IP:/home/weston/npu/
 ### 8.1 One-shot sanity check
 
 The board has **no** `onnxruntime` QNN provider and no Python QNN binding — the only path
-to the NPU is Qualcomm's native C++ runtime (`qnn-net-run`). Everything you need is now in
-`/home/weston/npu` (the previous step put it there): the context `.bin`, the runtime `.so`
-libs, the two scripts, and the pre-computed test input `emeet2_input.raw` (+ its
-`emeet2_meta.txt`). `npu/run_npu16.sh` feeds that frame through the NPU and drops the raw
-output as `npu_out.raw`; `decode_npu_out.py` decodes it and confirms the paddle was found.
+to the NPU is Qualcomm's native C++ runtime, `qnn-net-run` (already on the board, in
+`/usr/bin`). Everything else you need is now in `/home/weston/npu` (the previous step put it
+there): the context `.bin`, the two scripts, and the pre-computed test input
+`emeet2_input.raw` (+ its `emeet2_meta.txt`). `npu/run_npu16.sh` feeds that frame through the
+NPU and drops the raw output as `npu_out.raw`; `decode_npu_out.py` decodes it and confirms the
+paddle was found.
 
 ```bash
 # on the board
@@ -937,22 +937,32 @@ rsync -av user@x86-linux:/local/mnt/workspace/qairt-work/daemon/qnn-daemon-aarch
 scp npu-stage/qnn-daemon-aarch64 root@$BOARD_IP:/home/weston/npu/
 ```
 
-The daemon needs the `.bin` + `.so` libs already in `/home/weston/npu/` from 8.1, and the
-`web/` code already in `/opt/pingpong/web/` from Step 5 — nothing else to copy.
+The daemon uses the board's own QNN runtime in `/usr/lib` (the `.bin` from 8.1 is in
+`/home/weston/npu/`, and the `web/` code is already in `/opt/pingpong/web/` from Step 5) —
+nothing else to copy.
 
 **3. Run the live server on the NPU** (on the board):
 
 ```bash
 # on the board — cd to where the web/ code lives (from Step 5); setsid detaches it from the
-# SSH session (a plain '&' dies on logout)
+# SSH session (a plain '&' dies on logout), so all output goes to the log file, not your terminal
 cd /opt/pingpong
 setsid python3 web/server.py --model npu --cameras 26 --backend v4l2 --port 8080 \
   > /tmp/srv_npu.log 2>&1 < /dev/null &
-# open http://192.168.15.86:8080 — paddle detection drawn live by the NPU
+
+# because it's detached, watch the log to see it come up (Ctrl-C stops watching, NOT the server):
+tail -f /tmp/srv_npu.log
+# wait for the daemon's "QUANT ..." banner + "DAEMON_READY", then the HTTP server line.
+# then open http://192.168.15.86:8080 — paddle detection drawn live by the NPU
 ```
 
 `infer_npu.py` starts the daemon as a subprocess, waits for it to print `DAEMON_READY`,
-keeps the command FIFO open for the whole session, and cleanly sends `"q"` on shutdown.
+keeps the command FIFO open for the whole session, and cleanly sends `"q"` on shutdown. It
+loads the QNN backend from the board's `/usr/lib` (see the note at the end of Step 7 —
+the SDK's own libs don't run on the board).
+
+To stop the server later: `pkill -f 'server.py --model npu'` (it sends `"q"` to the daemon
+on the way out).
 
 <details>
 <summary>How the daemon works (the protocol, and the two per-frame paths)</summary>
@@ -993,17 +1003,18 @@ Python reads the raw `uint16` result from `/tmp/npu_out/.../output0.raw` and deq
 Measure the *whole* `.detect()` call (preprocess + inference + postprocess) — that's what
 the live stream actually pays per frame — for both engines on the same frame.
 
-The benchmark script expects a test image at `/tmp/emeet2.jpg`. Use the original hard frame
-if you have it, or copy any representative paddle frame there. The exact numbers below are
-from the original `emeet2.jpg`; a different image should still show the same CPU/NPU shape
-but may print a different box/confidence.
+The benchmark runs on a test frame — use the **same hard frame from Step 4.5** (my
+`emeet2.jpg` isn't shipped in the repo). Copy it to the board and pass its path. The exact
+numbers below are from my original frame; a different image shows the same CPU/NPU shape but
+may print a different box/confidence.
 
 ```bash
-# from the Mac, if you have a test frame locally
-scp path/to/emeet2.jpg root@$BOARD_IP:/tmp/emeet2.jpg
+# from the Mac — copy your Step 4.5 hard frame to the board
+scp /path/to/your_hard_frame.jpg root@$BOARD_IP:/tmp/emeet2.jpg
 
 # on the board (stop the web server first — it contends for the NPU/FIFOs)
-python3 yolo/bench_cpu_vs_npu.py
+pkill -f 'server.py --model npu' 2>/dev/null
+python3 yolo/bench_cpu_vs_npu.py /tmp/emeet2.jpg
 ```
 
 Results on the IQ-8275 EVK:
