@@ -538,35 +538,78 @@ and `qnn-context-binary-generator`. It's a free download (the **Community editio
 login or QPM). Match the version to your board's runtime; mine reported
 `QNN SDK v2.47.0.260601`, so I used the exact same SDK version.
 
+Pick a working directory with real disk space (**not** a quota-limited `$HOME` — the SDK
+unzips to ~4 GB). I used a scratch dir on the build server; anywhere writable is fine.
+
 ```bash
 # 1) Download + unzip the Community edition (this is the exact version I used):
-cd ~/qairt   # or wherever you want it
+mkdir -p /path/to/qairt-work && cd /path/to/qairt-work
 wget https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/2.47.0.260601/v2.47.0.260601.zip
-unzip v2.47.0.260601.zip     # -> creates ./2.47.0.260601/  (this folder is your SDK path)
-
-# 2) Create a Python venv the SDK tools run in, and let the SDK pull its own deps:
-python3 -m venv .venv && source .venv/bin/activate
-python3 2.47.0.260601/bin/check-python-dependency   # auto-installs ~30 packages
-pip install "numpy==1.26.4"   # IMPORTANT: pin this — numpy 2.x breaks the SDK's native libs
+unzip v2.47.0.260601.zip     # -> creates ./qairt/2.47.0.260601/  (this folder is your SDK path)
 ```
 
-Now point `SDK` in `npu/env.sh` at that `2.47.0.260601` folder. The SDK ships its own
-environment script (`bin/envsetup.sh`) which `env.sh` sources for you to put the tools on
-`PATH`. Verify with `qairt-converter --version` after sourcing `env.sh`.
+**2) Create the Python venv.** On a stock Ubuntu the built-in `python3 -m venv` is often
+broken (`ensurepip is not available`, needs `sudo apt install python3-venv`). Without sudo,
+use `virtualenv` instead — this is the reliable path, not a fallback:
 
-> **Note (headless/no-sudo boxes):** if the system `python3-venv` is broken, use
-> `pip install --user --break-system-packages virtualenv` then `virtualenv .venv`. If the
-> SDK's native `.so` files complain about missing `libc++.so.1` / `libc++abi.so.1` /
-> `libunwind.so.1`, fetch those `libc++`/`libunwind` packages and prepend their lib dir to
-> `LD_LIBRARY_PATH`. (This was my exact situation on a shared build server.)
+```bash
+pip install --user --break-system-packages virtualenv   # no sudo needed
+python3 -m virtualenv .venv
+source .venv/bin/activate
+```
+
+**3) Install the Python deps — in this exact order and with these versions.** The SDK's
+`check-python-dependency` only *verifies* packages, it does **not** install `onnx`, and
+recent `onnx`/`numpy` break the SDK's native code. These are the versions that work:
+
+```bash
+python3 qairt/2.47.0.260601/bin/check-python-dependency   # installs ~30 support packages
+pip install "numpy==1.26.4" "onnx==1.16.1" "onnxruntime==1.18.1"
+```
+
+> **Why these pins (each one is a real failure I hit reproducing this from scratch):**
+> - `numpy==1.26.4` — numpy 2.x breaks the SDK's native `.so` files.
+> - `onnx==1.16.1` — newer `onnx` (e.g. 1.22) drops the `onnx.version.version` attribute the
+>   converter reads → `AttributeError: module 'onnx' has no attribute 'version'`.
+> - `onnxruntime==1.18.1` — matches the pinned `onnx`.
+
+**4) Give the SDK the LLVM runtime libs it needs.** The SDK's native tools are built against
+LLVM's `libc++`, which a clean Ubuntu box does **not** ship and the SDK does **not** bundle —
+so out of the box you get `libc++.so.1: cannot open shared object file`. Fetch them without
+sudo and stage them in one dir:
+
+```bash
+cd /tmp
+# NOTE: use the *versioned LLVM* packages — they ship the .so.1 files under llvm-18/lib.
+# (The plain libc++1 / libunwind8 packages are the wrong ones: stubs, or the system .so.8.)
+apt-get download libc++1-18 libc++abi1-18 libunwind-18   # no install, just fetch the .debs
+for d in libc++1-18_*.deb libc++abi1-18_*.deb libunwind-18_*.deb; do
+  dpkg-deb -x "$d" /path/to/qairt-work/llvm-libs         # extract the WHOLE deb (symlinks need it)
+done
+cd -
+# The real objects sit under llvm-18/lib; point LLVM_LIBS there (that dir has all three .so.1):
+LLVM_LIBS=/path/to/qairt-work/llvm-libs/usr/lib/llvm-18/lib
+ls "$LLVM_LIBS"/libc++.so.1 "$LLVM_LIBS"/libc++abi.so.1 "$LLVM_LIBS"/libunwind.so.1   # confirm
+```
+
+Now point `SDK` (and the new `VENV` / `LLVM_LIBS`) in `npu/env.sh` at what you just built —
+`env.sh` sources the venv, sources the SDK's `bin/envsetup.sh` to put the tools on `PATH`,
+and prepends `LLVM_LIBS` to `LD_LIBRARY_PATH`. Verify with `qairt-converter --version` after
+sourcing `env.sh`.
 
 **Set up once — edit `npu/env.sh`:**
 
-Open `npu/env.sh` and set two paths (the third has a sensible default):
+Open `npu/env.sh` and set the paths for your machine:
 
 ```bash
 # SDK — where you unzipped the QAIRT SDK in 7.0 (the versioned folder with bin/ lib/ include/):
 : "${SDK:=/path/to/qairt/2.47.0.260601}"
+# VENV — the virtualenv you made in 7.0 step 2 (the dir containing bin/activate). Optional
+#        but needed on Ubuntu, where the SDK tools must run inside the pinned-deps venv.
+: "${VENV:=}"
+# LLVM_LIBS — the dir from 7.0 step 4 holding libc++.so.1 / libunwind.so.1. Optional, but
+#             required on a clean Ubuntu or the tools fail with "libc++.so.1: cannot open...".
+: "${LLVM_LIBS:=}"
 # R  — root of your aarch64 cross-compiler; ONLY for rebuilding the live daemon (Step 8.2).
 #      Leave the placeholder if you only want the one-shot NPU test (Step 8.1).
 : "${R:=/path/to/cross/root}"
@@ -576,6 +619,10 @@ Open `npu/env.sh` and set two paths (the third has a sensible default):
 
 - **`SDK`** — the folder you unzipped in 7.0. It's the versioned one *inside* the zip
   (e.g. `.../qairt/2.47.0.260601`) that contains `bin/`, `lib/`, `include/`.
+- **`VENV`** — the `virtualenv` from 7.0 step 2. `env.sh` activates it so the SDK tools use
+  the pinned `numpy`/`onnx`. Leave empty only if your system Python already has those pins.
+- **`LLVM_LIBS`** — the `libc++`/`libunwind` dir from 7.0 step 4. `env.sh` prepends it to
+  `LD_LIBRARY_PATH`. Leave empty only if your distro ships `libc++` system-wide.
 - **`R`** — only matters for the *live daemon* (Step 8.2). It's the root of an aarch64
   cross-compiler (a compiler that, running on x86, produces ARM binaries for the board).
   Setting it up is its own task; skip it for now if you just want to see the NPU run once.
