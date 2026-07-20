@@ -519,17 +519,21 @@ You'll get ~24 FPS end-to-end on the CPU. That's your **CPU baseline**.
 
 ## Step 7 — Convert the model for the Qualcomm NPU<a name="step-7"></a>
 
-This all happens on the **x86-64 Linux machine** with the QAIRT SDK installed. The scripts
-are in `npu/`. Copy `yolo/best.onnx` and your calibration data to that machine first.
+This is where the tutorial **switches computers**. Steps 1–6 ran on the Mac (and the board).
+Step 7 runs on an **x86-64 Linux machine** with the QAIRT SDK — the NPU compiler only exists
+for x86 Linux. So the flow is: you *trained* `best.onnx` on the Mac (Step 4.4), and now you
+carry it over to the x86 box to compile it for the NPU. The scripts are in `npu/`; the two
+machines and what runs where are called out at each sub-step below.
 
 > ⚠️ **What's different about Steps 7–8.** Unlike Phases A/B, these need extras the tutorial
 > can't ship for you: the (free) **QAIRT SDK**, an **x86-64 Linux box** to run it, and — to
 > rebuild the live daemon — an aarch64 cross-compiler. But you no longer hand-edit each
-> script. All the machine-specific paths now live in **one file, `npu/env.sh`**; every
-> `npu/*.sh` script sources it. **Edit `env.sh` once** (set `SDK`, and `R` if you rebuild the
-> daemon), then run the scripts as-is. Two honest caveats remain: the SDK is a separate
-> download, and rebuilding the C++ daemon needs the SDK's SampleApp source tree overlaid
-> (spelled out in [Step 8.2](#step-8)).
+> script. All the machine-specific paths live in **one file, `npu/env.sh`**, which every
+> `npu/*.sh` script sources. Better: if you `export QW=<work dir>` at the top of 7.0 (below),
+> `env.sh` derives everything from it and you **edit nothing** — the only exception is `R`
+> (the cross-compiler), needed just for the daemon in [Step 8.2](#step-8). Two honest caveats
+> remain: the SDK is a separate download, and rebuilding the C++ daemon needs the SDK's
+> SampleApp source tree overlaid (spelled out in Step 8.2).
 
 **7.0 — Install the QAIRT SDK** (on the x86 Linux box, once).
 
@@ -649,51 +653,67 @@ What each one means (only matters if you're editing by hand — the `$QW` path s
   DLCs and context `.bin` get written here too. It defaults to wherever you run the script,
   so: make a folder, drop `best.onnx` in it, run the scripts from there.
 
-The NPU can't run the float ONNX directly. Three transformations:
+The NPU can't run the float ONNX directly. But first you have to get the model — and its
+calibration data — onto the x86 box.
 
-**7.1 — ONNX → DLC (float).** `qairt-converter` translates the graph into Qualcomm's
-`.dlc` format, still in floating point. See `npu/convert_dlc.sh`:
+**7.1 — Bring `best.onnx` + calibration data from the Mac to the x86 box.** `best.onnx` was
+trained on the Mac back in Step 4.4. Quantization (7.3) also needs **calibration data**: it
+learns each tensor's value range by running the model on **real images**, which must go
+through the *exact* same preprocessing as inference. `yolo/gen_calib.py` produces ~200 `.raw`
+files (float32 NCHW, letterboxed 320² — reusing `_letterbox` from `infer_yolo.py` so it's
+bit-identical) plus an `input_list.txt`.
 
-```bash
-qairt-converter --input_network best.onnx --output_path best_fp.dlc
-```
-
-**7.2 — Generate calibration data.** Quantization (next step) learns each tensor's value
-range by running the model on **real images**, which must go through the *exact* same
-preprocessing as inference. `yolo/gen_calib.py` produces ~200 `.raw` files (float32 NCHW,
-letterboxed 320² — reusing `_letterbox` from `infer_yolo.py` so it's bit-identical) plus
-an `input_list.txt`.
-
-Run it on the Mac:
+Generate the calibration data **on the Mac**:
 
 ```bash
+# on the Mac, in the repo you trained in
 yolo/.venv/bin/python yolo/gen_calib.py
 # -> yolo/calib/calib_0000.raw ... calib_0199.raw
 # -> yolo/calib/input_list.txt
 ```
 
-Then copy the ONNX and calibration folder to the x86 QAIRT machine. Keep the same relative
-layout (`best.onnx` next to a `calib/` folder):
+Then copy the ONNX and the calibration folder **from the Mac to the x86 box**, into the same
+`$QW` you set in 7.0. Keep the layout `best.onnx` next to a `calib/` folder:
 
 ```bash
-# from the Mac ($QW here is the work dir on the x86 box, from 7.0)
+# on the Mac — replace user@x86-linux:/local/mnt/workspace/qairt-work with your box and your $QW
 rsync -av yolo/best.onnx yolo/calib user@x86-linux:/local/mnt/workspace/qairt-work/
-
-# on the x86 QAIRT machine (same shell where you set $QW in 7.0)
-cd "$QW"
 ```
 
 The generated `input_list.txt` intentionally uses portable relative paths like
 `calib/calib_0000.raw`. If you generate your own list with absolute Mac paths and then copy
 it to Linux, `qairt-quantizer` will fail with `Failed to open input file: /Users/...`.
-If that happens, regenerate the list on the x86 box:
+If that happens, regenerate the list **on the x86 box**:
 
 ```bash
+# on the x86 box, in $QW
 find "$PWD/calib" -name 'calib_*.raw' | sort > calib/input_list.txt
 ```
 
-**7.3 — Quantize → the A16W8 trap.** This is the subtle part. `qairt-quantizer` converts
-the float model to small integers so the NPU runs fast. See `npu/requant_a16w8.sh`:
+**7.2 — ONNX → DLC (float)** *(on the x86 box)*. Now that `best.onnx` is in `$QW`,
+`qairt-converter` translates the graph into Qualcomm's `.dlc` format, still in floating point.
+Use `npu/convert_dlc.sh` — it sources `env.sh`, `cd`s into `$WORK` (= `$QW`), and runs the
+converter with the right paths, so you don't have to be in the right directory by hand:
+
+```bash
+# on the x86 box
+cd "$QW/pingpong-qualcomm"
+bash npu/convert_dlc.sh          # reads $WORK/best.onnx -> writes $WORK/best_fp.dlc
+```
+
+<details><summary>What the script runs under the hood</summary>
+
+```bash
+qairt-converter --input_network best.onnx --output_path best_fp.dlc
+```
+(Run it by hand only if you `cd "$QW"` first — otherwise you'll hit `best.onnx does not exist`,
+because the model lives in `$QW`, not in the repo dir where `env.sh` is.)
+
+</details>
+
+**7.3 — Quantize → the A16W8 trap** *(on the x86 box)*. This is the subtle part.
+`qairt-quantizer` converts the float `best_fp.dlc` to small integers so the NPU runs fast.
+See `npu/requant_a16w8.sh`:
 
 ```bash
 qairt-quantizer \
@@ -711,8 +731,8 @@ qairt-quantizer \
 > NPU reports a healthy confidence (~0.75) again. If your quantized model "detects but with
 > score 0," this is almost certainly why.
 
-**7.4 — Build the NPU context binary.** `qnn-context-binary-generator` compiles the
-quantized DLC into a `.bin` pre-optimized for the **Hexagon V75** HTP. This needs a small
+**7.4 — Build the NPU context binary** *(on the x86 box)*. `qnn-context-binary-generator`
+compiles the quantized DLC into a `.bin` pre-optimized for the **Hexagon V75** HTP. This needs a small
 JSON config naming the graph and target arch (`"htp_arch": "v75"`). See
 `npu/requant_a16w8.sh` (it does 7.3 and 7.4 together) and `npu/gen_ctx2.sh`.
 
