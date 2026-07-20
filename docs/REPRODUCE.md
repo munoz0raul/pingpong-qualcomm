@@ -797,11 +797,16 @@ bash "$QW"/pingpong-qualcomm/npu/copy_runtime_libs.sh "$QW"/runtime_libs
 
 **Then get those files onto the board — via the Mac.** If, like me, your QAIRT box is a
 remote/cloud x86 machine, it usually **can't reach the board** (the board is on your local
-network). The Mac reaches both, so hop through it: pull from the x86 box to a staging folder
-on the Mac, then push to the board.
+network). The Mac reaches both, so hop through it: pull the compiled artifacts from the x86
+box, add the scripts + a test frame from your Mac clone, and push the whole bundle to the
+board. Everything the board runs in Step 8.1 lives **flat in one folder** (`/home/weston/npu`).
 
 ```bash
-# on the Mac — pull the .bin + runtime libs down from the x86 box into a staging folder.
+# on the Mac, from your pingpong-qualcomm clone. First generate the test-frame input
+# (needs cv2 + web/infer_yolo — that's why it runs here, not on the board):
+yolo/.venv/bin/python yolo/gen_test_input.py   # -> yolo/emeet2_input.raw + yolo/emeet2_meta.txt
+
+# Pull the .bin + runtime libs down from the x86 box into a staging folder.
 # Replace user@x86-linux and /local/mnt/workspace/qairt-work with your box and your $QW
 # ($QW is a shell var on the x86 box — it doesn't exist here, so write the path out).
 mkdir -p npu-stage
@@ -809,10 +814,14 @@ rsync -av user@x86-linux:/local/mnt/workspace/qairt-work/runtime_libs/ \
           user@x86-linux:/local/mnt/workspace/qairt-work/ctx16/best_a16w8_htpv75.bin \
           npu-stage/
 
-# on the Mac — make the target dir on the board FIRST, then push (scp of many files needs it)
+# Add the two scripts the board runs + the two test inputs it reads (all from this clone).
+cp npu/run_npu16.sh yolo/decode_npu_out.py \
+   yolo/emeet2_input.raw yolo/emeet2_meta.txt npu-stage/
+
+# Make the target dir on the board FIRST, then push everything (scp of many files needs it).
 BOARD_IP=192.168.15.86
 ssh root@$BOARD_IP 'mkdir -p /home/weston/npu'
-scp npu-stage/*.so npu-stage/best_a16w8_htpv75.bin root@$BOARD_IP:/home/weston/npu/
+scp npu-stage/* root@$BOARD_IP:/home/weston/npu/
 ```
 
 ---
@@ -822,16 +831,19 @@ scp npu-stage/*.so npu-stage/best_a16w8_htpv75.bin root@$BOARD_IP:/home/weston/n
 ### 8.1 One-shot sanity check
 
 The board has **no** `onnxruntime` QNN provider and no Python QNN binding — the only path
-to the NPU is Qualcomm's native C++ runtime (`qnn-net-run`). First confirm the NPU works
-on a single frame. `yolo/gen_test_input.py` writes a test frame as `.raw`; `npu/run_npu16.sh`
-runs it through the NPU; `yolo/decode_npu_out.py` decodes the raw output and confirms the
-paddle was found.
+to the NPU is Qualcomm's native C++ runtime (`qnn-net-run`). Everything you need is now in
+`/home/weston/npu` (the previous step put it there): the context `.bin`, the runtime `.so`
+libs, the two scripts, and the pre-computed test input `emeet2_input.raw` (+ its
+`emeet2_meta.txt`). `npu/run_npu16.sh` feeds that frame through the NPU and drops the raw
+output as `npu_out.raw`; `decode_npu_out.py` decodes it and confirms the paddle was found.
 
 ```bash
 # on the board
-bash npu/run_npu16.sh              # writes out16/Result_0/output0.raw
-python3 yolo/decode_npu_out.py     # -> "NPU detected 1 paddle(s): box=... prob=0.74"
+cd /home/weston/npu
+bash run_npu16.sh          # runs the NPU; writes out16/Result_0/output0.raw -> npu_out.raw
+python3 decode_npu_out.py  # -> "NPU detected 1 paddle(s): box=... prob=0.74"
 ```
+
 
 The **raw NPU compute is ~1.7 ms** — about **84× faster** than the CPU's 145 ms for the
 same math. (Measured via `qnn-net-run --profiling`.)

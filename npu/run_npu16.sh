@@ -35,4 +35,12 @@ qnn-net-run \
 echo "rc=$?"
 echo "===== Outputs ====="
 find "$NPU_DIR/out16" -type f 2>/dev/null
+
+# qnn-net-run writes out16/Result_0/output0.raw; decode_npu_out.py reads npu_out.raw
+# next to itself. Bridge the two so the decode step is a plain `python3 decode_npu_out.py`.
+OUT_RAW="$NPU_DIR/out16/Result_0/output0.raw"
+if [ -f "$OUT_RAW" ]; then
+  cp "$OUT_RAW" "$NPU_DIR/npu_out.raw"
+  echo "copied -> $NPU_DIR/npu_out.raw"
+fi
 echo "===== END ====="
