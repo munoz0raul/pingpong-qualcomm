@@ -8,16 +8,23 @@
 # different on every machine, so its path can't be baked into each script. Set it once here.
 
 # --- EDIT THESE TWO ---------------------------------------------------------
-# Your QAIRT SDK install (contains bin/qairt-converter, qairt-quantizer, etc.):
+# SDK = the folder where you unzipped the QAIRT SDK. It holds the NPU compiler tools
+#   (bin/.../qairt-converter, qairt-quantizer, qnn-context-binary-generator) and the
+#   runtime libraries. Don't have it yet? See Step 7.0 in docs/REPRODUCE.md — it's a
+#   free download. After unzipping, this is the versioned folder inside, e.g.
+#   /home/you/qairt/2.47.0.260601  (the one that contains bin/, lib/, include/).
 : "${SDK:=/path/to/qairt/2.47.0.260601}"
-# aarch64 cross-compile sysroot — ONLY needed by build_base.sh / build_daemon.sh
-# (where aarch64-linux-gnu-g++-13 and its libs live). Leave as-is if you're not
-# rebuilding the C++ daemon.
+
+# R = the ROOT of your aarch64 cross-compiler (a "sysroot"). Only needed if you rebuild
+#   the live C++ daemon (build_base.sh / build_daemon.sh) — the compiler that makes ARM
+#   binaries for the board lives here (usr/bin/aarch64-linux-gnu-g++-13). If you only
+#   want the one-shot NPU test (Step 8.1), leave this untouched — it's not used.
 : "${R:=/path/to/cross/root}"
 # ----------------------------------------------------------------------------
 
-# x86 work directory: where best.onnx, the DLCs, calib/, and the ctx output live.
-# Defaults to the directory you run the script from — put best.onnx there and you're set.
+# WORK = your working directory on this x86 box: where you put best.onnx and the calib/
+#   folder, and where the DLCs + context .bin get written. Defaults to the folder you run
+#   the script from, so the simple recipe is: cd into a folder, drop best.onnx there, go.
 : "${WORK:=$PWD}"
 
 # Sanity: the SDK path must exist, or every downstream command fails cryptically.

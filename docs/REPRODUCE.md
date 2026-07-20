@@ -58,9 +58,9 @@ Linux box. Every step below says exactly which machine it assumes.
 
 **Software**
 - On the Mac: Python 3, `git`.
-- On the x86 Linux box: Qualcomm's **QAIRT SDK** (I used v2.47.0.260601), a free download
-  from the Qualcomm developer site. It contains `qairt-converter`,
-  `qairt-quantizer`, `qnn-context-binary-generator`, and `qnn-net-run`.
+- On the x86 Linux box: Qualcomm's **QAIRT SDK** (I used v2.47.0.260601), a free download.
+  It contains `qairt-converter`, `qairt-quantizer`, `qnn-context-binary-generator`, and
+  `qnn-net-run`. [Step 7.0](#step-7) has the exact download + install commands.
 - To build the live-NPU C++ daemon: an aarch64 cross-compiler
   (`aarch64-linux-gnu-g++-13`). [Step 8](#step-8) covers this.
 
@@ -531,18 +531,57 @@ are in `npu/`. Copy `yolo/best.onnx` and your calibration data to that machine f
 > download, and rebuilding the C++ daemon needs the SDK's SampleApp source tree overlaid
 > (spelled out in [Step 8.2](#step-8)).
 
-**Set up once — edit `npu/env.sh`:**
+**7.0 — Install the QAIRT SDK** (on the x86 Linux box, once).
+
+The QAIRT SDK is Qualcomm's NPU toolkit — it holds `qairt-converter`, `qairt-quantizer`,
+and `qnn-context-binary-generator`. It's a free download (the **Community edition** needs no
+login or QPM). Match the version to your board's runtime; mine reported
+`QNN SDK v2.47.0.260601`, so I used the exact same SDK version.
 
 ```bash
-# npu/env.sh — set these to match your machine, then leave it alone.
-: "${SDK:=/path/to/qairt/2.47.0.260601}"   # <-- your QAIRT SDK install
-: "${R:=/path/to/cross/root}"              # <-- aarch64 sysroot (only for the daemon build)
-: "${WORK:=$PWD}"                          # x86 work dir — best.onnx, DLCs, calib/, ctx live here
+# 1) Download + unzip the Community edition (this is the exact version I used):
+cd ~/qairt   # or wherever you want it
+wget https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/2.47.0.260601/v2.47.0.260601.zip
+unzip v2.47.0.260601.zip     # -> creates ./2.47.0.260601/  (this folder is your SDK path)
+
+# 2) Create a Python venv the SDK tools run in, and let the SDK pull its own deps:
+python3 -m venv .venv && source .venv/bin/activate
+python3 2.47.0.260601/bin/check-python-dependency   # auto-installs ~30 packages
+pip install "numpy==1.26.4"   # IMPORTANT: pin this — numpy 2.x breaks the SDK's native libs
 ```
 
-Put `best.onnx` and your `calib/` folder in `WORK` (defaults to wherever you run the script
-from). Every command below is what the scripts run; the scripts just wrap it with `$SDK` /
-`$WORK` from `env.sh`.
+Now point `SDK` in `npu/env.sh` at that `2.47.0.260601` folder. The SDK ships its own
+environment script (`bin/envsetup.sh`) which `env.sh` sources for you to put the tools on
+`PATH`. Verify with `qairt-converter --version` after sourcing `env.sh`.
+
+> **Note (headless/no-sudo boxes):** if the system `python3-venv` is broken, use
+> `pip install --user --break-system-packages virtualenv` then `virtualenv .venv`. If the
+> SDK's native `.so` files complain about missing `libc++.so.1` / `libc++abi.so.1` /
+> `libunwind.so.1`, fetch those `libc++`/`libunwind` packages and prepend their lib dir to
+> `LD_LIBRARY_PATH`. (This was my exact situation on a shared build server.)
+
+**Set up once — edit `npu/env.sh`:**
+
+Open `npu/env.sh` and set two paths (the third has a sensible default):
+
+```bash
+# SDK — where you unzipped the QAIRT SDK in 7.0 (the versioned folder with bin/ lib/ include/):
+: "${SDK:=/path/to/qairt/2.47.0.260601}"
+# R  — root of your aarch64 cross-compiler; ONLY for rebuilding the live daemon (Step 8.2).
+#      Leave the placeholder if you only want the one-shot NPU test (Step 8.1).
+: "${R:=/path/to/cross/root}"
+# WORK — your working dir; put best.onnx + the calib/ folder here. Defaults to $PWD.
+: "${WORK:=$PWD}"
+```
+
+- **`SDK`** — the folder you unzipped in 7.0. It's the versioned one *inside* the zip
+  (e.g. `.../qairt/2.47.0.260601`) that contains `bin/`, `lib/`, `include/`.
+- **`R`** — only matters for the *live daemon* (Step 8.2). It's the root of an aarch64
+  cross-compiler (a compiler that, running on x86, produces ARM binaries for the board).
+  Setting it up is its own task; skip it for now if you just want to see the NPU run once.
+- **`WORK`** — your scratch directory. Put `best.onnx` and the `calib/` folder here; the
+  DLCs and context `.bin` get written here too. It defaults to wherever you run the script,
+  so: make a folder, drop `best.onnx` in it, run the scripts from there.
 
 The NPU can't run the float ONNX directly. Three transformations:
 
