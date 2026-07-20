@@ -861,6 +861,34 @@ npu` reuses the unchanged MJPEG loop.
 
 Three steps: build the daemon, get it onto the board, run the server.
 
+**0. Set up the aarch64 cross-compiler (`$R`) — once.** The daemon is a native ARM binary,
+so on the x86 box you need a compiler that *targets* aarch64. This is the one path `env.sh`
+doesn't derive from `$QW`. If `aarch64-linux-gnu-g++-13` isn't already installed system-wide,
+fetch it into a private root **without sudo** (same `apt-get download` + `dpkg-deb -x` trick
+as the SDK libs in 7.0):
+
+```bash
+# on the x86 box — stage the cross toolchain under $QW/cross/root (no sudo needed)
+export R="$QW/cross/root"
+mkdir -p "$R" && cd "$R"
+for p in gcc-13-aarch64-linux-gnu g++-13-aarch64-linux-gnu \
+         cpp-13-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+         libc6-dev-arm64-cross libstdc++-13-dev-arm64-cross linux-libc-dev-arm64-cross; do
+  apt-get download "$p" 2>/dev/null
+done
+for deb in *.deb; do dpkg-deb -x "$deb" "$R"; done
+cd "$QW"
+"$R"/usr/bin/aarch64-linux-gnu-g++-13 --version   # sanity: prints gcc 13.x
+# then set it in env.sh so the build scripts see it:
+#   : "${R:=$QW/cross/root}"      (or: export R="$QW/cross/root" before running the build)
+```
+
+> Package names/versions vary by distro release; the point is a self-contained
+> `aarch64-linux-gnu-g++-13` + its target libc/libstdc++ under one root. `build_daemon.sh`
+> passes `--sysroot="$R"` so it finds the ARM libraries there. If your box already provides
+> `aarch64-linux-gnu-g++-13`, just point `$R` at `/` (or wherever `usr/bin/...` lives) and skip
+> the download.
+
 **1. Build the daemon** (on the x86 box — cross-compiled for aarch64). This repo ships the
 **modified** daemon sources (`npu/daemon/`), not the full SampleApp tree — but the script
 handles that: on the first run it copies the SampleApp from your `$SDK`, overlays our three

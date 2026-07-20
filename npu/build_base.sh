@@ -3,6 +3,12 @@
 # just to prove that the QNN headers + toolchain produce a binary that runs on the board.
 set +e
 source "$(dirname "$0")/env.sh" || exit 1
+# Needs the aarch64 cross-compiler ($R) — the one path env.sh doesn't derive from $QW.
+if [ ! -x "$R/usr/bin/aarch64-linux-gnu-g++-13" ]; then
+  echo "ERROR: aarch64 cross-compiler not found under R=$R" >&2
+  echo "       Set R in npu/env.sh. See 'Set up the aarch64 cross-compiler' in Step 8.2." >&2
+  exit 1
+fi
 export LD_LIBRARY_PATH="$R/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
 GXX="$R/usr/bin/aarch64-linux-gnu-g++-13"
 GCCDIR="$R/usr/lib/gcc-cross/aarch64-linux-gnu/13"

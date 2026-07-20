@@ -4,6 +4,17 @@
 set +e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/env.sh" || exit 1
+
+# The daemon (unlike the one-shot NPU test) needs the aarch64 cross-compiler, i.e. $R.
+# $R is the ONE path env.sh doesn't derive from $QW — it's a separate toolchain. Fail here
+# with a clear message instead of a cryptic "g++-13: No such file or directory / rc=127".
+if [ ! -x "$R/usr/bin/aarch64-linux-gnu-g++-13" ]; then
+  echo "ERROR: aarch64 cross-compiler not found under R=$R" >&2
+  echo "       (looked for \$R/usr/bin/aarch64-linux-gnu-g++-13)" >&2
+  echo "       Set R in npu/env.sh to your cross-toolchain root. Don't have one yet?" >&2
+  echo "       See 'Set up the aarch64 cross-compiler' in Step 8.2 of docs/REPRODUCE.md." >&2
+  exit 1
+fi
 export LD_LIBRARY_PATH="$R/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
 GXX="$R/usr/bin/aarch64-linux-gnu-g++-13"
 GCCDIR="$R/usr/lib/gcc-cross/aarch64-linux-gnu/13"
