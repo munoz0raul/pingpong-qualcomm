@@ -602,7 +602,13 @@ sourcing `env.sh`.
 
 **Set up once — edit `npu/env.sh`:**
 
-Open `npu/env.sh` and set the paths for your machine:
+`npu/env.sh` lives inside the repo you cloned in step 0, at
+`pingpong-qualcomm/npu/env.sh`. Open it and set the paths for your machine:
+
+```bash
+cd /path/to/qairt-work/pingpong-qualcomm   # the clone from step 0
+$EDITOR npu/env.sh                          # nano/vim — edit the paths below
+```
 
 ```bash
 # SDK — where you unzipped the QAIRT SDK in 7.0 (the versioned folder with bin/ lib/ include/):
