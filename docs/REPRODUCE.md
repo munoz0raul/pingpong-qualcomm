@@ -542,8 +542,11 @@ Pick a working directory with real disk space (**not** a quota-limited `$HOME` â
 unzips to ~4 GB). I used a scratch dir on the build server; anywhere writable is fine.
 
 ```bash
-# 1) Download + unzip the Community edition (this is the exact version I used):
+# 0) Clone this repo on the x86 box â€” the npu/*.sh scripts and npu/env.sh live here:
 mkdir -p /path/to/qairt-work && cd /path/to/qairt-work
+git clone https://github.com/munoz0raul/pingpong-qualcomm.git
+
+# 1) Download + unzip the Community edition (this is the exact version I used):
 wget https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/2.47.0.260601/v2.47.0.260601.zip
 unzip v2.47.0.260601.zip     # -> creates ./qairt/2.47.0.260601/  (this folder is your SDK path)
 ```
