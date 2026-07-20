@@ -305,9 +305,11 @@ yolo/.venv/bin/python yolo/prep_yolo.py
 yolo/.venv/bin/python yolo/prep_yolo.py --check
 ```
 
-The Edge Impulse `training/`→YOLO `train`, `testing/`→YOLO `val` split is preserved (no
-leakage: they were distinct splits to begin with). Background images get an **empty**
-`.txt` — YOLO uses those as negatives.
+Your Edge Impulse dataset export already comes split into two folders — `training/` (photos
+the model learns from) and `testing/` (photos it never sees during training, used only to
+score it). `prep_yolo.py` keeps that split: `training/`→YOLO `train`, `testing/`→YOLO `val`
+(no leakage — a test photo sneaking into training would inflate the score into a lie). Background
+images (no paddle) get an **empty** `.txt` — YOLO uses those as negatives.
 
 > **What this does:** rewrites the same boxes into the layout YOLO's trainer expects.
 > **Why it matters:** it's the *same math as Step 1* (`cx=(x+w/2)/W`, normalized) — YOLO
