@@ -713,7 +713,25 @@ because the model lives in `$QW`, not in the repo dir where `env.sh` is.)
 
 **7.3 — Quantize → the A16W8 trap** *(on the x86 box)*. This is the subtle part.
 `qairt-quantizer` converts the float `best_fp.dlc` to small integers so the NPU runs fast.
-See `npu/requant_a16w8.sh`:
+Use `npu/requant_a16w8.sh` — like the converter script it sources `env.sh` and `cd`s into
+`$WORK` (= `$QW`), so the paths just work. **This one script does 7.3 *and* 7.4**: it
+quantizes to A16W8 and then builds the context `.bin` (7.4) in one go.
+
+> **⚠️ The trap:** plain INT8 (8-bit everything) **crushes the confidence score to zero**.
+> Why: in this model the box coordinates (values 0–580) and the score (0–1) share the same
+> quantization scale. The huge coordinate range flattens the delicate little score into
+> nothing. **Fix:** use **16-bit activations, 8-bit weights** (`--act_bitwidth 16`,
+> called **A16W8** — what the script already does). The extra activation precision protects
+> the score. After this fix the NPU reports a healthy confidence (~0.75) again. If your
+> quantized model "detects but with score 0," this is almost certainly why.
+
+```bash
+# on the x86 box
+cd "$QW/pingpong-qualcomm"
+bash npu/requant_a16w8.sh        # $WORK/best_fp.dlc -> best_a16w8.dlc -> ctx16/best_a16w8_htpv75.bin
+```
+
+<details><summary>What the quantize step runs under the hood</summary>
 
 ```bash
 qairt-quantizer \
@@ -722,24 +740,26 @@ qairt-quantizer \
   --act_bitwidth 16 --weights_bitwidth 8 \
   --output_dlc best_a16w8.dlc
 ```
+(Run it by hand only if you `cd "$QW"` first — otherwise you'll hit `best_fp.dlc does not exist`.
+Both `best_fp.dlc` and the relative `calib/input_list.txt` are resolved from `$QW`, not the
+repo dir where `env.sh` lives.)
 
-> **⚠️ The trap:** plain INT8 (8-bit everything) **crushes the confidence score to zero**.
-> Why: in this model the box coordinates (values 0–580) and the score (0–1) share the same
-> quantization scale. The huge coordinate range flattens the delicate little score into
-> nothing. **Fix:** use **16-bit activations, 8-bit weights** (`--act_bitwidth 16`,
-> called **A16W8**). The extra activation precision protects the score. After this fix the
-> NPU reports a healthy confidence (~0.75) again. If your quantized model "detects but with
-> score 0," this is almost certainly why.
+</details>
 
 **7.4 — Build the NPU context binary** *(on the x86 box)*. `qnn-context-binary-generator`
-compiles the quantized DLC into a `.bin` pre-optimized for the **Hexagon V75** HTP. This needs a small
-JSON config naming the graph and target arch (`"htp_arch": "v75"`). See
-`npu/requant_a16w8.sh` (it does 7.3 and 7.4 together) and `npu/gen_ctx2.sh`.
+compiles the quantized DLC into a `.bin` pre-optimized for the **Hexagon V75** HTP. This needs
+a small JSON config naming the graph and target arch (`"htp_arch": "v75"`).
 
-Minimal version of the config files (edit `$SDK` to your QAIRT install path):
+**If you ran `npu/requant_a16w8.sh` in 7.3, this is already done** — it wrote
+`ctx16/best_a16w8_htpv75.bin` for you. `npu/gen_ctx2.sh` is the same step kept as a
+standalone reference. The block below shows what that build does under the hood.
+
+<details><summary>What the context-binary step runs under the hood</summary>
+
+Run from `$QW` (`cd "$QW"` first — the script does this for you):
 
 ```bash
-SDK="$QW/qairt/2.47.0.260601"   # where the zip unpacked in 7.0 (same $QW shell)
+SDK="$QW/qairt/2.47.0.260601"   # where the zip unpacked in 7.0
 
 cat > htp_config.json <<'JSON'
 {
@@ -766,6 +786,8 @@ qnn-context-binary-generator \
   --config_file backend_ext.json
 # -> ctx16/best_a16w8_htpv75.bin
 ```
+
+</details>
 
 The board needs `best_a16w8_htpv75.bin` plus a handful of Qualcomm runtime `.so` libraries
 (the board has no SDK — just these). `npu/copy_runtime_libs.sh` gathers the right ones from
