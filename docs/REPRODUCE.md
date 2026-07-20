@@ -704,10 +704,9 @@ bash npu/convert_dlc.sh          # reads $WORK/best.onnx -> writes $WORK/best_fp
 <details><summary>What the script runs under the hood</summary>
 
 ```bash
+cd "$QW"        # the model lives here (env.sh's dir does not)
 qairt-converter --input_network best.onnx --output_path best_fp.dlc
 ```
-(Run it by hand only if you `cd "$QW"` first — otherwise you'll hit `best.onnx does not exist`,
-because the model lives in `$QW`, not in the repo dir where `env.sh` is.)
 
 </details>
 
@@ -734,15 +733,13 @@ bash npu/requant_a16w8.sh        # $WORK/best_fp.dlc -> best_a16w8.dlc -> ctx16/
 <details><summary>What the quantize step runs under the hood</summary>
 
 ```bash
+cd "$QW"        # best_fp.dlc + calib/ live here (env.sh's dir does not)
 qairt-quantizer \
   --input_dlc best_fp.dlc \
   --input_list calib/input_list.txt \
   --act_bitwidth 16 --weights_bitwidth 8 \
   --output_dlc best_a16w8.dlc
 ```
-(Run it by hand only if you `cd "$QW"` first — otherwise you'll hit `best_fp.dlc does not exist`.
-Both `best_fp.dlc` and the relative `calib/input_list.txt` are resolved from `$QW`, not the
-repo dir where `env.sh` lives.)
 
 </details>
 
@@ -756,9 +753,8 @@ standalone reference. The block below shows what that build does under the hood.
 
 <details><summary>What the context-binary step runs under the hood</summary>
 
-Run from `$QW` (`cd "$QW"` first — the script does this for you):
-
 ```bash
+cd "$QW"        # best_a16w8.dlc lives here; write the configs + ctx16/ alongside it
 SDK="$QW/qairt/2.47.0.260601"   # where the zip unpacked in 7.0
 
 cat > htp_config.json <<'JSON'
