@@ -8,6 +8,17 @@
 # different on every machine, so its path can't be baked into each script. Set it once here.
 
 # --- EDIT THESE -------------------------------------------------------------
+# QW = optional shortcut. If you followed Step 7.0 you already did `export QW=<work dir>`;
+#   since it's exported, this file (sourced by the scripts) sees it too. When QW is set, the
+#   four paths below AUTO-DERIVE from it and you edit NOTHING here. If QW is unset (e.g. a
+#   fresh shell, or a hand-built layout), fall through to the manual defaults and edit those.
+if [ -n "$QW" ]; then
+  : "${SDK:=$QW/qairt/2.47.0.260601}"          # 7.0 step 1 unzips the SDK here
+  : "${VENV:=$QW/.venv}"                        # 7.0 step 2 makes the venv here
+  : "${LLVM_LIBS:=$QW/llvm-libs/usr/lib/llvm-18/lib}"   # 7.0 step 4 stages libc++ here
+  : "${WORK:=$QW}"                              # best.onnx + calib/ get rsync'd here
+fi
+
 # SDK = the folder where you unzipped the QAIRT SDK. It holds the NPU compiler tools
 #   (bin/.../qairt-converter, qairt-quantizer, qnn-context-binary-generator) and the
 #   runtime libraries. Don't have it yet? See Step 7.0 in docs/REPRODUCE.md — it's a

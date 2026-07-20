@@ -604,33 +604,37 @@ Now point `SDK` (and the new `VENV` / `LLVM_LIBS`) in `npu/env.sh` at what you j
 and prepends `LLVM_LIBS` to `LD_LIBRARY_PATH`. Verify with `qairt-converter --version` after
 sourcing `env.sh`.
 
-**Set up once — edit `npu/env.sh`:**
+**Set up once — `npu/env.sh` (usually zero edits):**
 
-`npu/env.sh` lives inside the repo you cloned in step 0, at
-`pingpong-qualcomm/npu/env.sh`. Open it and set the paths for your machine — use **absolute
-paths here** (this file is sourced by the scripts in their own shells, so `$QW` won't be set):
+`npu/env.sh` lives inside the repo you cloned in step 0, at `pingpong-qualcomm/npu/env.sh`.
+It's the single config the other `npu/*.sh` scripts source. **If `$QW` is still exported in
+your shell (from the top of 7.0), you don't edit it at all** — `env.sh` sees `$QW` and derives
+`SDK`, `VENV`, `LLVM_LIBS` and `WORK` from it automatically:
 
 ```bash
-cd "$QW/pingpong-qualcomm"   # the clone from step 0
-$EDITOR npu/env.sh                          # nano/vim — edit the paths below
+cd "$QW/pingpong-qualcomm"          # the clone from step 0
+source npu/env.sh                   # $QW is exported, so SDK/VENV/LLVM_LIBS/WORK auto-derive
+qairt-converter --version           # confirm the tools are on PATH
 ```
 
+You only ever hand-edit `env.sh` in two cases: (a) a **fresh shell** where `$QW` is no longer
+set — just `export QW=<your work dir>` again before sourcing; or (b) a **non-standard layout**
+(SDK/venv/libs not under `$QW`) — then open `env.sh` and set the absolute paths directly. The
+only value never derived from `$QW` is `R` (the aarch64 cross-compiler), needed just for the
+live daemon in Step 8.2 — leave it at its placeholder unless you get there. For reference, the
+editable block:
+
 ```bash
-# SDK — where you unzipped the QAIRT SDK in 7.0 (the versioned folder with bin/ lib/ include/).
-#       With the $QW above that's literally  $QW/qairt/2.47.0.260601  — paste the expanded path:
-: "${SDK:=/path/to/qairt/2.47.0.260601}"
-# VENV — the virtualenv you made in 7.0 step 2 (the dir containing bin/activate). Optional
-#        but needed on Ubuntu, where the SDK tools must run inside the pinned-deps venv.
-: "${VENV:=}"
-# LLVM_LIBS — the dir from 7.0 step 4 holding libc++.so.1 / libunwind.so.1. Optional, but
-#             required on a clean Ubuntu or the tools fail with "libc++.so.1: cannot open...".
-: "${LLVM_LIBS:=}"
-# R  — root of your aarch64 cross-compiler; ONLY for rebuilding the live daemon (Step 8.2).
-#      Leave the placeholder if you only want the one-shot NPU test (Step 8.1).
+# QW set? Then these four auto-derive and you edit nothing. QW unset? Edit them by hand.
+: "${SDK:=/path/to/qairt/2.47.0.260601}"    # <- $QW/qairt/2.47.0.260601
+: "${VENV:=}"                               # <- $QW/.venv
+: "${LLVM_LIBS:=}"                          # <- $QW/llvm-libs/usr/lib/llvm-18/lib
+: "${WORK:=$PWD}"                           # <- $QW  (where best.onnx + calib/ live)
+# R — aarch64 cross-compiler root; ONLY for the live daemon (Step 8.2). Not under $QW.
 : "${R:=/path/to/cross/root}"
-# WORK — your working dir; put best.onnx + the calib/ folder here. Defaults to $PWD.
-: "${WORK:=$PWD}"
 ```
+
+What each one means (only matters if you're editing by hand — the `$QW` path skips this):
 
 - **`SDK`** — the folder you unzipped in 7.0. It's the versioned one *inside* the zip
   (e.g. `.../qairt/2.47.0.260601`) that contains `bin/`, `lib/`, `include/`.
