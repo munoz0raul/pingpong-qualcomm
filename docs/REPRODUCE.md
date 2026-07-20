@@ -803,8 +803,10 @@ board. Everything the board runs in Step 8.1 lives **flat in one folder** (`/hom
 
 ```bash
 # on the Mac, from your pingpong-qualcomm clone. First generate the test-frame input
-# (needs cv2 + web/infer_yolo — that's why it runs here, not on the board):
-yolo/.venv/bin/python yolo/gen_test_input.py   # -> yolo/emeet2_input.raw + yolo/emeet2_meta.txt
+# (needs cv2 + web/infer_yolo — that's why it runs here, not on the board). Pass the same
+# hard frame you captured in Step 4.5 (emeet2.jpg was mine and isn't shipped in the repo):
+yolo/.venv/bin/python yolo/gen_test_input.py /path/to/your_hard_frame.jpg
+# -> yolo/emeet2_input.raw + yolo/emeet2_meta.txt
 
 # Pull the .bin + runtime libs down from the x86 box into a staging folder.
 # Replace user@x86-linux and /local/mnt/workspace/qairt-work with your box and your $QW
