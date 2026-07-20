@@ -542,8 +542,12 @@ Pick a working directory with real disk space (**not** a quota-limited `$HOME` �
 unzips to ~4 GB). I used a scratch dir on the build server; anywhere writable is fine.
 
 ```bash
+# Set your work dir ONCE — the rest of this step is copy-paste. Pick a spot with real disk
+# (~4 GB free); NOT a quota-limited $HOME. Everything below uses $QW, so change only this line:
+export QW=/local/mnt/workspace/qairt-work    # <-- EDIT this to your work dir
+
 # 0) Clone this repo on the x86 box — the npu/*.sh scripts and npu/env.sh live here:
-mkdir -p /path/to/qairt-work && cd /path/to/qairt-work
+mkdir -p "$QW" && cd "$QW"
 git clone https://github.com/munoz0raul/pingpong-qualcomm.git
 
 # 1) Download + unzip the Community edition (this is the exact version I used):
@@ -587,11 +591,11 @@ cd /tmp
 # (The plain libc++1 / libunwind8 packages are the wrong ones: stubs, or the system .so.8.)
 apt-get download libc++1-18 libc++abi1-18 libunwind-18   # no install, just fetch the .debs
 for d in libc++1-18_*.deb libc++abi1-18_*.deb libunwind-18_*.deb; do
-  dpkg-deb -x "$d" /path/to/qairt-work/llvm-libs         # extract the WHOLE deb (symlinks need it)
+  dpkg-deb -x "$d" "$QW/llvm-libs"                      # extract the WHOLE deb (symlinks need it)
 done
 cd -
 # The real objects sit under llvm-18/lib; point LLVM_LIBS there (that dir has all three .so.1):
-LLVM_LIBS=/path/to/qairt-work/llvm-libs/usr/lib/llvm-18/lib
+LLVM_LIBS="$QW/llvm-libs/usr/lib/llvm-18/lib"
 ls "$LLVM_LIBS"/libc++.so.1 "$LLVM_LIBS"/libc++abi.so.1 "$LLVM_LIBS"/libunwind.so.1   # confirm
 ```
 
@@ -603,15 +607,17 @@ sourcing `env.sh`.
 **Set up once — edit `npu/env.sh`:**
 
 `npu/env.sh` lives inside the repo you cloned in step 0, at
-`pingpong-qualcomm/npu/env.sh`. Open it and set the paths for your machine:
+`pingpong-qualcomm/npu/env.sh`. Open it and set the paths for your machine — use **absolute
+paths here** (this file is sourced by the scripts in their own shells, so `$QW` won't be set):
 
 ```bash
-cd /path/to/qairt-work/pingpong-qualcomm   # the clone from step 0
+cd "$QW/pingpong-qualcomm"   # the clone from step 0
 $EDITOR npu/env.sh                          # nano/vim — edit the paths below
 ```
 
 ```bash
-# SDK — where you unzipped the QAIRT SDK in 7.0 (the versioned folder with bin/ lib/ include/):
+# SDK — where you unzipped the QAIRT SDK in 7.0 (the versioned folder with bin/ lib/ include/).
+#       With the $QW above that's literally  $QW/qairt/2.47.0.260601  — paste the expanded path:
 : "${SDK:=/path/to/qairt/2.47.0.260601}"
 # VENV — the virtualenv you made in 7.0 step 2 (the dir containing bin/activate). Optional
 #        but needed on Ubuntu, where the SDK tools must run inside the pinned-deps venv.
@@ -666,11 +672,11 @@ Then copy the ONNX and calibration folder to the x86 QAIRT machine. Keep the sam
 layout (`best.onnx` next to a `calib/` folder):
 
 ```bash
-# from the Mac
-rsync -av yolo/best.onnx yolo/calib user@x86-linux:/path/to/qairt-work/
+# from the Mac ($QW here is the work dir on the x86 box, from 7.0)
+rsync -av yolo/best.onnx yolo/calib user@x86-linux:/local/mnt/workspace/qairt-work/
 
-# on the x86 QAIRT machine
-cd /path/to/qairt-work
+# on the x86 QAIRT machine (same shell where you set $QW in 7.0)
+cd "$QW"
 ```
 
 The generated `input_list.txt` intentionally uses portable relative paths like
@@ -709,7 +715,7 @@ JSON config naming the graph and target arch (`"htp_arch": "v75"`). See
 Minimal version of the config files (edit `$SDK` to your QAIRT install path):
 
 ```bash
-SDK=/path/to/qairt/2.47.0.260601
+SDK="$QW/qairt/2.47.0.260601"   # where the zip unpacked in 7.0 (same $QW shell)
 
 cat > htp_config.json <<'JSON'
 {
