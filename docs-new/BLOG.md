@@ -42,75 +42,28 @@ configuring quantization pipelines, and cross-compiling C++ daemons, you work th
 browser UI and download a file that runs directly on your board. The headline result of
 this chapter: **2 ms inference on the NPU** without writing a single line of training code.
 
-### Dataset collection and labelling
-
 One of Edge Impulse's most useful features is its data collection and labelling toolchain.
-Before any model can be trained, you need a dataset: photos of the object, each annotated
-with a rectangle showing where the object is.
+Before any model can be trained, you need a dataset — photos of the object, each annotated
+with a bounding box showing where the object is. Edge Impulse Studio's **Data acquisition**
+tab handles this end-to-end: record directly from a connected device, upload existing
+images, and draw bounding boxes in the browser with a simple drag tool. That is exactly
+how the dataset for this project was built — roughly 670 images labelled directly in the
+Studio, no external tool required.
 
-Edge Impulse Studio's **Data acquisition** tab handles this end-to-end: you can record
-directly from a connected device, upload existing images, and draw bounding boxes in the
-browser with a simple drag tool. That is exactly how the dataset for this project was
-built — roughly 670 images labelled directly in the Studio, no external tool required.
+![Edge Impulse Data acquisition: 687 labelled images, 80/20 train/test split](img/ei_dataset.png)
 
-The platform also lets you export your dataset in its own format and re-import it into
-a new project at any time, with all bounding boxes and the train/test split intact.
+The platform also exports your dataset in its own format and re-imports it into a new
+project at any time, with all bounding boxes and the train/test split intact. From there,
+the full pipeline is a handful of steps in the browser: build an impulse (Image input,
+320x320, YOLOv5 learning block), generate features, train on a GPU worker, and deploy.
+Training on 559 images took about 15 minutes and produced **mAP@0.5 = 0.980** — the mean
+Average Precision metric that measures how accurately and completely the model detects the
+object, where 1.0 is perfect.
 
-### Running the full pipeline
-
-**1. Create a project.**
-
-Log in to [Edge Impulse Studio](https://studio.edgeimpulse.com), click **Create new project**,
-and name it. The project type is set later when you add the learning block.
-
-![Edge Impulse project dashboard](img/ei_01_project_dashboard.png)
-
-**2. Upload the dataset.**
-
-Go to *Data acquisition → Add data → Upload data*, set upload mode to **Select a folder**,
-and choose the `pingpong-export/` folder. The `info.labels` manifest file inside it
-preserves every bounding box and the original train/test split. 559 training images and
-128 test images appear fully labelled in seconds.
-
-![Uploading the dataset with info.labels manifest](img/ei_02_upload_data.png)
-
-**3. Build the impulse.**
-
-In *Impulse design*, add an *Image* input (320 x 320, RGB), an *Image* processing block,
-and a **YOLOv5** object-detection learning block.
-
-![Impulse design: Image input + YOLOv5 learning block](img/ei_03_impulse_design.png)
-
-**4. Generate features.**
-
-Click *Image → Generate features*. The job confirms the dataset is clean:
-559 training items, 1 class (`paddles`).
-
-![Generate features: 559 items, 1 class](img/ei_04_generate_features.png)
-
-**5. Configure and train.**
-
-Open the YOLOv5 settings, set **GPU**, **Small (7.2M params)**, **60 cycles**,
-**pretrained weights on**, **Profile int8 model enabled**, and click **Save & train**.
-Training runs on Edge Impulse's servers. Result after ~15 minutes:
-
-![YOLOv5 training configuration](img/ei_05_yolov5_settings.png)
-
-**mAP@0.5 = 0.980.** The mAP (mean Average Precision) at IoU threshold 0.5 is the
-standard metric for object detectors. It combines precision (how often detections are
-correct) and recall (how many real objects were found) into a single number from 0 to 1,
-where 1.0 means every object found perfectly, every time. Getting 0.980 means the model
-missed almost nothing and had almost no false detections on the 112-image validation set.
-
-![Training result: mAP 0.980](img/ei_06_training_result.png)
-
-**6. Deploy to the board.**
-
-Go to *Deployment*, find **"Qualcomm Dragonwing IQ 8275 EVK (AARCH64 with Qualcomm QNN
-(Qualcomm Neural Network))"**, and download the `.eim` file. That file is a self-contained
-native binary. No runtime to install separately on the board.
-
-**7. Copy and run.**
+The deployment step is what makes this platform remarkable for Qualcomm hardware. Under
+*Deployment*, selecting **"Qualcomm Dragonwing IQ 8275 EVK (AARCH64 with Qualcomm QNN
+(Qualcomm Neural Network))"** produces a single `.eim` file — a self-contained native
+binary that runs on the board with no additional runtime installation.
 
 ```bash
 scp pingpong-demo.eim root@<board-ip>:/home/weston/
